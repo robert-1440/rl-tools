@@ -118,6 +118,12 @@ class CommandLineProcessor {
     return false;
   }
 
+
+  String? findOptionalArgPlusOne(String name) {
+    var result = findOptionalArgs(name);
+    return result == null ? null : result[0];
+  }
+
   ///
   /// Used to find optional arguments, such as <code>--print hello</code>.<p>
   /// [name] => the name of the argument to look for (i.e. --print)<p>

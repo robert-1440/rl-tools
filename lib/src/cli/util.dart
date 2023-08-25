@@ -4,6 +4,8 @@ import 'dart:math';
 
 import 'package:uuid/uuid.dart';
 
+final separatorChar = Platform.pathSeparator;
+
 abstract class Mappable {
   Map<String, dynamic> toMap();
 }
@@ -498,4 +500,16 @@ void fatalError(String message) {
 String getName(FileSystemEntity entity) {
   var parts = entity.path.split(Platform.pathSeparator);
   return parts[parts.length - 1];
+}
+
+File formFile(Directory parent, String name) {
+  return File("${parent.path}$separatorChar$name");
+}
+
+String readFile(Directory parent, String name) {
+  var f = formFile(parent, name);
+  if (!f.existsSync()) {
+    fatalError("${f.path} does not exist.");
+  }
+  return f.readAsStringSync();
 }
