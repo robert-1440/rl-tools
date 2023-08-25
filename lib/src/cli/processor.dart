@@ -263,3 +263,4 @@ class CommandLineProcessor {
 String getOurExecutableName() {
   return Platform.executable.split(Platform.pathSeparator).last;
 }
+

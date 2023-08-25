@@ -470,3 +470,32 @@ bool promptYes(String prompt, {int? exitCode}) {
     return false;
   }
 }
+
+/// Returns the home directory for the current user.
+String getHomePath() {
+  switch (Platform.operatingSystem) {
+    case 'linux':
+    case 'macos':
+      return Platform.environment['HOME']!;
+
+    case 'windows':
+      return Platform.environment['USERPROFILE']!;
+
+    default:
+      throw StateError("Unsupported operating system ${Platform.operatingSystem}");
+  }
+}
+
+File formHomeFile(String name) {
+  return File("${getHomePath()}${Platform.pathSeparator}$name");
+}
+
+void fatalError(String message) {
+  stderr.writeln(message);
+  exit(2);
+}
+
+String getName(FileSystemEntity entity) {
+  var parts = entity.path.split(Platform.pathSeparator);
+  return parts[parts.length - 1];
+}
