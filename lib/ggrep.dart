@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:rl_tools/src/cli/processor.dart';
 
@@ -58,6 +59,35 @@ String getName(String filePath) {
   return filePath;
 }
 
+final List<Encoding> encodings = [utf8, latin1, ascii];
+
+String? _decode(Uint8List bytes, Encoding encoding) {
+  try {
+    return encoding.decode(bytes);
+  } on FormatException catch (e) {
+    return null;
+  } catch (e) {
+    String message = "$e".toLowerCase();
+    if (message.contains("decode") || message.contains("unexpected extension")) {
+      return null;
+    }
+    rethrow;
+  }
+}
+
+
+String? readFile(FileSystemEntity entity) {
+  var bytes = File(entity.path).readAsBytesSync();
+  for (var encoding in encodings) {
+    var data = _decode(bytes, encoding);
+    if (data != null) {
+      return data;
+    }
+  }
+  stderr.writeln("WARNING: unable decode read ${entity.path}.");
+  return null;
+}
+
 void process(List<String> args) {
   var cli = CommandLineProcessor(args, usage: "Usage: ${getOurExecutableName()} [-rn] pattern filemask");
   var recurse = cli.hasOptionalArg("-r");
@@ -70,7 +100,10 @@ void process(List<String> args) {
   var entries = dir.listSync(recursive: recurse);
   var re = RegExp(pattern);
   for (var entry in entries.where((element) => match(fileMask, getName(element.path)))) {
-    String data = File(entry.path).readAsStringSync();
+    String? data = readFile(entry);
+    if (data == null) {
+      continue;
+    }
     if (re.hasMatch(data)) {
       if (nameOnly) {
         print(entry.path);
