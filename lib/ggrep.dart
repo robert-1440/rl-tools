@@ -75,7 +75,6 @@ String? _decode(Uint8List bytes, Encoding encoding) {
   }
 }
 
-
 String? readFile(FileSystemEntity entity) {
   var bytes = File(entity.path).readAsBytesSync();
   for (var encoding in encodings) {
@@ -88,18 +87,20 @@ String? readFile(FileSystemEntity entity) {
   return null;
 }
 
-void process(List<String> args) {
-  var cli = CommandLineProcessor(args, usage: "Usage: ${getOurExecutableName()} [-rn] pattern filemask");
-  var recurse = cli.hasOptionalArg("-r");
-  var nameOnly = cli.hasOptionalArg("-n");
-  var pattern = cli.next("pattern");
-  var fileMask = cli.next("filemask");
-  cli.assertNoMore();
-
-  var dir = Directory(".");
-  var entries = dir.listSync(recursive: recurse);
-  var re = RegExp(pattern);
-  for (var entry in entries.where((element) => match(fileMask, getName(element.path)))) {
+void processDir(RegExp re, String fileMask, bool nameOnly, Directory dir, bool recurse) {
+  List<FileSystemEntity> entries;
+  try {
+    entries = dir.listSync();
+  } on PathAccessException {
+    return;
+  }
+  for (var entry in entries.where((element) => element is Directory || match(fileMask, getName(element.path)))) {
+    if (entry is Directory) {
+      if (recurse) {
+        processDir(re, fileMask, nameOnly, entry, recurse);
+      }
+      continue;
+    }
     String? data = readFile(entry);
     if (data == null) {
       continue;
@@ -118,4 +119,17 @@ void process(List<String> args) {
       }
     }
   }
+}
+
+void process(List<String> args) {
+  var cli = CommandLineProcessor(args, usage: "Usage: ${getOurExecutableName()} [-rn] pattern filemask");
+  var recurse = cli.hasOptionalArg("-r");
+  var nameOnly = cli.hasOptionalArg("-n");
+  var pattern = cli.next("pattern");
+  var fileMask = cli.next("filemask");
+  cli.assertNoMore();
+
+  var dir = Directory(".");
+  var re = RegExp(pattern);
+  processDir(re, fileMask, nameOnly, dir, recurse);
 }

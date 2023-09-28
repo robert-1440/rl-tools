@@ -3,4 +3,5 @@
 .dart_tool/
 .idea/
 dist/
+scratch/
 pubspec.lock
