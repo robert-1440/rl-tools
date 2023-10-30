@@ -4,6 +4,10 @@ import 'dart:typed_data';
 
 import 'package:rl_tools/src/cli/processor.dart';
 
+var python = false;
+
+var pythonExcludeDirs = {"dist", "virtual-envs", "site-packages"};
+
 bool match(String pattern, String name) {
   if (pattern == "*") {
     return true;
@@ -87,6 +91,14 @@ String? readFile(FileSystemEntity entity) {
   return null;
 }
 
+bool filterOnSet(FileSystemEntity entity, Set<String> excludeSet) {
+  String name = getName(entity.path);
+  if (name.startsWith(".") || excludeSet.contains(name)) {
+    return false;
+  }
+  return true;
+}
+
 void processDir(RegExp re, String fileMask, bool nameOnly, Directory dir, bool recurse) {
   List<FileSystemEntity> entries;
   try {
@@ -97,6 +109,9 @@ void processDir(RegExp re, String fileMask, bool nameOnly, Directory dir, bool r
   for (var entry in entries.where((element) => element is Directory || match(fileMask, getName(element.path)))) {
     if (entry is Directory) {
       if (recurse) {
+        if (python && !filterOnSet(entry, pythonExcludeDirs)) {
+          continue;
+        }
         processDir(re, fileMask, nameOnly, entry, recurse);
       }
       continue;
@@ -122,12 +137,18 @@ void processDir(RegExp re, String fileMask, bool nameOnly, Directory dir, bool r
 }
 
 void process(List<String> args) {
-  var cli = CommandLineProcessor(args, usage: "Usage: ${getOurExecutableName()} [-rn] pattern filemask");
+  var cli = CommandLineProcessor(args, usage: "Usage: ${getOurExecutableName()} [-rn] [--python] pattern filemask");
   var recurse = cli.hasOptionalArg("-r");
   var nameOnly = cli.hasOptionalArg("-n");
+  python = cli.hasOptionalArg("--python");
   var pattern = cli.next("pattern");
-  var fileMask = cli.next("filemask");
-  cli.assertNoMore();
+  String fileMask;
+  if (python && !cli.hasMore()) {
+    fileMask = "*.py";
+  } else {
+    fileMask = cli.next("filemask");
+    cli.assertNoMore();
+  }
 
   var dir = Directory(".");
   var re = RegExp(pattern);
