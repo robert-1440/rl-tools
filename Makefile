@@ -6,6 +6,8 @@ BIN=~/bin/
 
 STANDARD=pubspec.yaml $(CLI)processor.dart $(CLI)mapper.dart $(CLI)util.dart
 
+.PHONY: all tests ggrep gitcheck check_imports mkd
+
 all: tests build
 
 tests:
@@ -14,6 +16,8 @@ tests:
 ggrep: $(BIN)ggrep
 
 gitcheck: $(DIST)gitcheck
+
+mkd: $(BIN)mkd
 
 check_imports: $(DIST)check_imports
 
@@ -29,4 +33,7 @@ $(DIST)gitcheck: $(STANDARD) $(LIB)gitcheck.dart
 $(DIST)check_imports: $(STANDARD) $(LIB)check_imports.dart
 	@dart compile exe -o $(DIST)check_imports $(LIB)check_imports.dart
 
-build: ggrep gitcheck check_imports
+$(BIN)mkd: $(STANDARD) $(LIB)mkd.dart
+	@dart compile exe -o $(BIN)mkd $(LIB)mkd.dart
+
+build: ggrep gitcheck check_imports mkd
