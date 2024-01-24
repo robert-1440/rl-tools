@@ -1,33 +1,8 @@
 import 'dart:io';
 
+import 'package:rl_tools/src/envloader.dart';
 import 'package:rl_tools/src/cli/exec.dart';
 import 'package:rl_tools/src/cli/processor.dart';
-
-void processFile(String fileName, Map<String, String> environment) {
-  var file = File(fileName);
-  if (!file.existsSync()) {
-    print("File $fileName does not exist.");
-    return;
-  }
-  var lines = file.readAsLinesSync();
-  for (var line in lines) {
-    line = line.trim();
-    if (line.isEmpty) {
-      continue;
-    }
-    if (line.startsWith("#")) {
-      continue;
-    }
-    int index = line.indexOf("=");
-    if (index < 0) {
-      print("Invalid line: $line");
-      continue;
-    }
-    var key = line.substring(0, index).trim();
-    var value = line.substring(index + 1).trim();
-    environment[key] = value;
-  }
-}
 
 void setWorkspaceEnv(String name) {
   var envFile = File(name);
@@ -51,7 +26,7 @@ String? loadDefaultEnv() {
 
 void main(List<String> args) async {
   var cli = CommandLineProcessor(args,
-      usage: "$getOurExecutableName() [--env envfile | --set envfile] [...]\nUsed to run 'make' with environment settings..");
+      usage: "$getOurExecutableName() [--env envfile | --set envfile] [--test] [...]\nUsed to run 'make' with environment settings..");
   if (cli.hasOptionalArg("--help")) {
     cli.invokeUsage();
     exit(1);
@@ -62,6 +37,8 @@ void main(List<String> args) async {
     setWorkspaceEnv(setEnv);
   }
   var anyEnvs = false;
+
+  var testIt = cli.hasOptionalArg("--test");
 
   Map<String, String> environment = {};
   for (;;) {
@@ -78,6 +55,14 @@ void main(List<String> args) async {
       print("Loading default environment $defaultEnv.");
       processFile(defaultEnv, environment);
     }
+  }
+  if (testIt) {
+    stdout.writeln();
+    for (var entry in environment.entries) {
+      print("${entry.key}=${entry.value}");
+    }
+    stdout.writeln();
+    exit(0);
   }
   await executeOut("make", cli.remaining(), environment);
 }

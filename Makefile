@@ -38,7 +38,7 @@ $(DIST)check_imports: $(STANDARD) $(LIB)check_imports.dart
 $(BIN)mkd: $(STANDARD) $(LIB)mkd.dart
 	@dart compile exe -o $(BIN)mkd $(LIB)mkd.dart
 
-$(BIN)mkenv: $(STANDARD) $(LIB)makeenv.dart $(CLI)exec.dart $(CLI)util.dart $(CLI)mapper.dart
+$(BIN)mkenv: $(STANDARD) $(LIB)makeenv.dart $(CLI)exec.dart $(CLI)util.dart $(CLI)mapper.dart $(SRC)envloader.dart
 	@dart compile exe -o $(BIN)mkenv $(LIB)makeenv.dart
 
 build: ggrep gitcheck check_imports mkd mkenv
