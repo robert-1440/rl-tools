@@ -118,7 +118,6 @@ class CommandLineProcessor {
     return false;
   }
 
-
   String? findOptionalArgPlusOne(String name) {
     var result = findOptionalArgs(name);
     return result == null ? null : result[0];
@@ -175,6 +174,13 @@ class CommandLineProcessor {
       return true;
     }
     return false;
+  }
+
+  ///
+  /// Returns the remaining arguments.
+  ///
+  List<String> remaining() {
+    return _arguments.sublist(_index);
   }
 
   ///
@@ -269,4 +275,3 @@ class CommandLineProcessor {
 String getOurExecutableName() {
   return Platform.executable.split(Platform.pathSeparator).last;
 }
-

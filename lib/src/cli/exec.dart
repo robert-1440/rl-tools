@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -40,4 +41,39 @@ Future<Execution> execute(String command, List<String> args) async {
     throw ExecutionError(execution.stderrString, exitCode);
   }
   return execution;
+}
+
+Future<void> executeOut(String command, List<String> args, Map<String, String> environment) async {
+  var process = await Process.start(command, args, environment: environment, includeParentEnvironment: true);
+  // Completer<int> stdoutCompleter = Completer<int>();
+  //
+  // Completer<int> stderrCompleter = Completer<int>();
+  //
+  //
+  // stdin.listen((List<int> data) {
+  //   process.stdin.add(data);
+  // }, onDone: () {
+  //   process.stdin.close();
+  // });
+  //
+  // process.stdout.transform(utf8.decoder).listen((String data) {
+  //   print(data);
+  // }, onDone: () {
+  //   stdoutCompleter.complete(process.exitCode);
+  // });
+  //
+  // process.stderr.transform(utf8.decoder).listen((String data) {
+  //   stderr.write(data);
+  // }, onDone: () {
+  //   stderrCompleter.complete(process.exitCode);
+  // });
+  //
+  // await Future.wait([stdoutCompleter.future, stderrCompleter.future]);
+
+  stdout.addStream(process.stdout);
+  stderr.addStream(process.stderr);
+  process.stdin.addStream(stdin);
+
+  var exitCode = await process.exitCode;
+  exit(exitCode);
 }
