@@ -513,3 +513,7 @@ String readFile(Directory parent, String name) {
   }
   return f.readAsStringSync();
 }
+
+String checkHomeInPath(String path) {
+  return path.replaceAll("~", getHomePath());
+}

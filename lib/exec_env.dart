@@ -26,7 +26,8 @@ String? loadDefaultEnv() {
 
 void main(List<String> args) async {
   var cli = CommandLineProcessor(args,
-      usage: "${getOurExecutableName()} [--env envfile | --set envfile] [--test] [...]\nUsed to run 'make' with environment settings..");
+      usage: "${getOurExecutableName()} command [--env envfile | --set envfile] [--test] [...]\nUsed to run 'command' with environment settings..");
+
   if (cli.hasOptionalArg("--help")) {
     cli.invokeUsage();
     exit(1);
@@ -49,6 +50,7 @@ void main(List<String> args) async {
     anyEnvs = true;
     processFile(env, environment);
   }
+  var command = cli.next('command');
   if (!anyEnvs) {
     var defaultEnv = loadDefaultEnv();
     if (defaultEnv != null) {
@@ -64,5 +66,5 @@ void main(List<String> args) async {
     stdout.writeln();
     exit(0);
   }
-  await executeOut("make", cli.remaining(), environment);
+  await executeOut(command, cli.remaining(), environment);
 }

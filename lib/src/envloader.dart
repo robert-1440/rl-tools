@@ -1,5 +1,7 @@
 import 'dart:io';
 
+import 'package:rl_tools/src/cli/util.dart';
+
 void processFile(String fileName, Map<String, String> environment) {
   var file = File(fileName);
   if (!file.existsSync()) {
@@ -33,7 +35,7 @@ void processFile(String fileName, Map<String, String> environment) {
       offset = 2;
     }
     var key = line.substring(0, index).trim();
-    var value = line.substring(index + offset).trim();
+    var value = checkHomeInPath(line.substring(index + offset).trim());
 
     if (conditional) {
       if (Platform.environment.containsKey(key) || environment.containsKey(key)) {
