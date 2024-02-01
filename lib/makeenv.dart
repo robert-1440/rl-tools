@@ -56,6 +56,7 @@ void main(List<String> args) async {
       processFile(defaultEnv, environment);
     }
   }
+  environment['__MK_ENV__'] = '1';
   if (testIt) {
     stdout.writeln();
     for (var entry in environment.entries) {
