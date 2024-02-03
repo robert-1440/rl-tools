@@ -31,6 +31,16 @@ void main(List<String> args) async {
     cli.invokeUsage();
     exit(1);
   }
+  if (cli.hasOptionalArg("--current")) {
+    cli.assertNoMore();
+    var defaultEnv = loadDefaultEnv();
+    if (defaultEnv != null) {
+      print("Default environment is set to $defaultEnv");
+    } else {
+      print("No default environment is set.");
+    }
+    exit(0);
+  }
   var setEnv = cli.findOptionalArgPlusOne('--set');
   if (setEnv != null) {
     cli.assertNoMore();
