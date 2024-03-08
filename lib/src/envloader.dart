@@ -76,12 +76,53 @@ void _processFile(File file, _Instance instance) {
   }
 }
 
+class LineParser {
+  final List<String> lines;
+
+  int _index = 0;
+
+  LineParser(this.lines);
+
+  String next() {
+    return lines[_index++];
+  }
+
+  bool hasMore() {
+    return _index < lines.length;
+  }
+
+  void backup() {
+    _index -= 1;
+  }
+}
+
+String _parseMultiLine(String line, LineParser parser) {
+  var buffer = StringBuffer();
+  buffer.write(line);
+  while (parser.hasMore()) {
+    line = parser.next();
+    if (line.isNotEmpty && (line.startsWith(' ') || line.startsWith('\t'))) {
+      line = line.trim();
+      if (line.isEmpty) {
+        break;
+      }
+      buffer.write(line);
+    } else {
+      break;
+    }
+  }
+  return buffer.toString();
+}
+
 void _parseFile(File file, _Instance instance) {
   var lines = file.readAsLinesSync();
   int lineNumber = 0;
   var fileName = file.path;
   var environment = instance._environment;
-  for (var line in lines) {
+  var parser = LineParser(lines);
+  while (parser.hasMore()) {
+    var line = parser.next();
+
     lineNumber += 1;
     line = line.trim();
     if (line.isEmpty) {
@@ -116,6 +157,9 @@ void _parseFile(File file, _Instance instance) {
       if (Platform.environment.containsKey(key) || environment.containsKey(key)) {
         continue;
       }
+    }
+    if (value.endsWith(r'\')) {
+      value = _parseMultiLine(value.substring(0, value.length - 1), parser);
     }
     environment[key] = value;
   }
