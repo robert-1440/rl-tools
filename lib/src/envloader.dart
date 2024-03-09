@@ -2,6 +2,19 @@ import 'dart:io';
 
 import 'package:rl_tools/src/cli/util.dart';
 
+final _macroRegex = RegExp(r'\$\{(.*?)}');
+
+String replaceProperties(String template, Map<String, dynamic> properties) {
+  return template.replaceAllMapped(_macroRegex, (match) {
+    var key = match.group(1);
+    var value = properties[key];
+    if (value == null) {
+      throw ArgumentError('Property not found: $key');
+    }
+    return value.toString();
+  });
+}
+
 class _Instance {
   final Map<String, String> _environment;
 
@@ -161,6 +174,6 @@ void _parseFile(File file, _Instance instance) {
     if (value.endsWith(r'\')) {
       value = _parseMultiLine(value.substring(0, value.length - 1), parser);
     }
-    environment[key] = value;
+    environment[key] = replaceProperties(value, environment);
   }
 }
