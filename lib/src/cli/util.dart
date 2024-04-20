@@ -506,8 +506,16 @@ File formFile(Directory parent, String name) {
   return File("${parent.path}$separatorChar$name");
 }
 
-String readFile(Directory parent, String name) {
+String readFileInDir(Directory parent, String name) {
   var f = formFile(parent, name);
+  if (!f.existsSync()) {
+    fatalError("${f.path} does not exist.");
+  }
+  return f.readAsStringSync();
+}
+
+String readFile(String name) {
+  File f = File(name);
   if (!f.existsSync()) {
     fatalError("${f.path} does not exist.");
   }

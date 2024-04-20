@@ -81,7 +81,7 @@ void _examine(String fileName) {
 }
 
 void resolveProject(Directory folder) {
-  String yaml = readFile(folder, "pubspec.yaml");
+  String yaml = readFileInDir(folder, "pubspec.yaml");
   var m = loadYaml(yaml);
   String name = m["name"];
   projectName = name;

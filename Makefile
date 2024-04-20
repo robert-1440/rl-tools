@@ -3,6 +3,7 @@ LIB=lib/
 SRC=$(LIB)src/
 CLI=$(SRC)cli/
 BIN=~/bin/
+CSV=$(SRC)support/csv/
 
 STANDARD=pubspec.yaml $(CLI)processor.dart $(CLI)mapper.dart $(CLI)util.dart
 
@@ -20,6 +21,8 @@ gitcheck: $(DIST)gitcheck
 mkd: $(BIN)mkd
 
 mkenv: $(BIN)mkenv
+
+csv: $(BIN)csv
 
 ee: $(BIN)ee
 
@@ -40,10 +43,13 @@ $(DIST)check_imports: $(STANDARD) $(LIB)check_imports.dart
 $(BIN)mkd: $(STANDARD) $(LIB)mkd.dart
 	@dart compile exe -o $(BIN)mkd $(LIB)mkd.dart
 
+$(BIN)csv: $(STANDARD) $(LIB)csv.dart $(CSV)reader.dart $(CSV)builder.dart
+	@dart compile exe -o $(BIN)csv $(LIB)csv.dart
+
 $(BIN)mkenv: $(STANDARD) $(LIB)makeenv.dart $(CLI)exec.dart $(CLI)util.dart $(CLI)mapper.dart $(SRC)envloader.dart
 	@dart compile exe -o $(BIN)mkenv $(LIB)makeenv.dart
 
 $(BIN)ee: $(STANDARD) $(LIB)exec_env.dart $(CLI)exec.dart $(CLI)util.dart $(CLI)mapper.dart $(SRC)envloader.dart
 	@dart compile exe -o $(BIN)ee $(LIB)exec_env.dart
 
-build: ggrep gitcheck check_imports mkd mkenv ee
+build: ggrep gitcheck check_imports mkd mkenv ee csv
