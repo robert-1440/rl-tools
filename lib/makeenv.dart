@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:rl_tools/src/cli/util.dart';
 import 'package:rl_tools/src/envloader.dart';
 import 'package:rl_tools/src/cli/exec.dart';
 import 'package:rl_tools/src/cli/processor.dart';
@@ -26,7 +27,7 @@ String? loadDefaultEnv() {
 
 void main(List<String> args) async {
   var cli = CommandLineProcessor(args,
-      usage: "${getOurExecutableName()} [--env envfile | --set envfile] [--test] [...]\nUsed to run 'make' with environment settings..");
+      usage: "${getOurExecutableName()} [--env envfile | --set envfile] [--test] [--env-var name=value] [...]\nUsed to run 'make' with environment settings..");
   if (cli.hasOptionalArg("--help")) {
     cli.invokeUsage();
     exit(1);
@@ -67,6 +68,18 @@ void main(List<String> args) async {
     }
   }
   environment['__MK_ENV__'] = '1';
+  for (;;) {
+    var envVar = cli.findOptionalArgPlusOne("--env-var");
+    if (envVar == null) {
+      break;
+    }
+    var parts = splitInTwo(envVar, '=');
+    if (parts.length != 2) {
+      print("Invalid environment variable: $envVar");
+      exit(1);
+    }
+    environment[parts[0]] = parts[1];
+  }
   if (testIt) {
     stdout.writeln();
     for (var entry in environment.entries) {
