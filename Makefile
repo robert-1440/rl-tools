@@ -26,6 +26,8 @@ csv: $(BIN)csv
 
 ee: $(BIN)ee
 
+zipcmp: $(BIN)zipcmp
+
 check_imports: $(DIST)check_imports
 
 $(DIST)ggrep: $(STANDARD) $(LIB)ggrep.dart
@@ -52,4 +54,7 @@ $(BIN)mkenv: $(STANDARD) $(LIB)makeenv.dart $(CLI)exec.dart $(CLI)util.dart $(CL
 $(BIN)ee: $(STANDARD) $(LIB)exec_env.dart $(CLI)exec.dart $(CLI)util.dart $(CLI)mapper.dart $(SRC)envloader.dart
 	@dart compile exe -o $(BIN)ee $(LIB)exec_env.dart
 
-build: ggrep gitcheck check_imports mkd mkenv ee csv
+$(BIN)zipcmp: $(STANDARD) $(LIB)zipcmp.dart
+	@dart compile exe -o $(BIN)zipcmp $(LIB)zipcmp.dart
+
+build: ggrep gitcheck check_imports mkd mkenv ee csv zipcmp
