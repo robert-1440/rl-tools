@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:rl_tools/src/cli/processor.dart';
@@ -68,7 +69,7 @@ final List<Encoding> encodings = [utf8, latin1, ascii];
 String? _decode(Uint8List bytes, Encoding encoding) {
   try {
     return encoding.decode(bytes);
-  } on FormatException catch (e) {
+  } on FormatException {
     return null;
   } catch (e) {
     String message = "$e".toLowerCase();
@@ -99,7 +100,7 @@ bool filterOnSet(FileSystemEntity entity, Set<String> excludeSet) {
   return true;
 }
 
-void processDir(RegExp re, String fileMask, bool nameOnly, Directory dir, bool recurse) {
+void processDir(RegExp re, String fileMask, bool nameOnly, Directory dir, bool recurse, int? maxChars) {
   List<FileSystemEntity> entries;
   try {
     entries = dir.listSync();
@@ -112,7 +113,7 @@ void processDir(RegExp re, String fileMask, bool nameOnly, Directory dir, bool r
         if (python && !filterOnSet(entry, pythonExcludeDirs)) {
           continue;
         }
-        processDir(re, fileMask, nameOnly, entry, recurse);
+        processDir(re, fileMask, nameOnly, entry, recurse, maxChars);
       }
       continue;
     }
@@ -127,9 +128,21 @@ void processDir(RegExp re, String fileMask, bool nameOnly, Directory dir, bool r
         int lineNumber = 0;
         for (var line in splitter.convert(data)) {
           lineNumber++;
-          if (re.hasMatch(line)) {
-            print("${entry.path} $lineNumber: $line");
+          var matches = re.allMatches(line);
+          if (matches.isEmpty) {
+            continue;
           }
+          if (maxChars != null && line.length > maxChars) {
+            print('> Line $lineNumber:');
+            for (var match in matches) {
+              final start = max(0, match.start - maxChars);
+              final end = min(line.length, match.end + maxChars);
+              final snippet = line.substring(start, end);
+              print('   ...${snippet.replaceAll('\n', '')}...');
+            }
+            continue;
+          }
+          print("${entry.path} $lineNumber: $line");
         }
       }
     }
@@ -137,9 +150,10 @@ void processDir(RegExp re, String fileMask, bool nameOnly, Directory dir, bool r
 }
 
 void process(List<String> args) {
-  var cli = CommandLineProcessor(args, usage: "Usage: ${getOurExecutableName()} [-rn] [--python] pattern filemask");
+  var cli = CommandLineProcessor(args, usage: "Usage: ${getOurExecutableName()} [-rn] [--python] [--max-chars #] pattern filemask");
   var recurse = cli.hasOptionalArg("-r");
   var nameOnly = cli.hasOptionalArg("-n");
+  var maxChars = cli.findOptionalArgPlusOneInt("--max-chars");
   python = cli.hasOptionalArg("--python");
   var pattern = cli.next("pattern");
   String fileMask;
@@ -152,5 +166,5 @@ void process(List<String> args) {
 
   var dir = Directory(".");
   var re = RegExp(pattern);
-  processDir(re, fileMask, nameOnly, dir, recurse);
+  processDir(re, fileMask, nameOnly, dir, recurse, maxChars);
 }

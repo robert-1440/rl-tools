@@ -123,6 +123,18 @@ class CommandLineProcessor {
     return result == null ? null : result[0];
   }
 
+  int? findOptionalArgPlusOneInt(String name) {
+    var result = findOptionalArgPlusOne(name);
+    if (result == null || result.isEmpty) {
+      return null;
+    }
+    var value = int.tryParse(result);
+    if (value == null) {
+      invokeUsage("Expected an integer for $name, but got: $result");
+    }
+    return value;
+  }
+
   ///
   /// Used to find optional arguments, such as <code>--print hello</code>.<p>
   /// [name] => the name of the argument to look for (i.e. --print)<p>
