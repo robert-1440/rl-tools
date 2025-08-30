@@ -7,7 +7,7 @@ CSV=$(SRC)support/csv/
 
 STANDARD=pubspec.yaml $(CLI)processor.dart $(CLI)mapper.dart $(CLI)util.dart
 
-.PHONY: all tests ggrep gitcheck check_imports mkd mkenv ee
+.PHONY: all tests ggrep gitcheck check_imports mkd mkenv ee gitty
 
 all: tests build
 
@@ -27,6 +27,8 @@ csv: $(BIN)csv
 ee: $(BIN)ee
 
 zipcmp: $(BIN)zipcmp
+
+gitty: $(BIN)gitty
 
 check_imports: $(DIST)check_imports
 
@@ -57,4 +59,7 @@ $(BIN)ee: $(STANDARD) $(LIB)exec_env.dart $(CLI)exec.dart $(CLI)util.dart $(CLI)
 $(BIN)zipcmp: $(STANDARD) $(LIB)zipcmp.dart
 	@dart compile exe -o $(BIN)zipcmp $(LIB)zipcmp.dart
 
-build: ggrep gitcheck check_imports mkd mkenv ee csv zipcmp
+$(BIN)gitty: $(STANDARD) $(LIB)gitty.dart
+	@dart compile exe -o $(BIN)gitty bin/gitty.dart
+
+build: ggrep gitcheck check_imports mkd mkenv ee csv zipcmp gitty
