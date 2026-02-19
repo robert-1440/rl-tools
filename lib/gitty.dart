@@ -435,6 +435,20 @@ void _commitCommand(List<String> args) {
   print(result.stdout);
 }
 
+void tagTodayCommand(List<String> args) {
+  if (args.isNotEmpty) {
+    print("\x1b[31mError: tag-today command does not take any arguments\x1b[0m");
+    print("Usage: gitty tag-today");
+    exit(1);
+  }
+  final date = DateTime.now();
+  final tagName = "v${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}";
+  print("Creating/updating tag '$tagName' to current commit...");
+  _executeGit(['tag', '-f', tagName]);
+  _executeGit(['push', '-f', 'origin', tagName]);
+  print("\x1b[32mTag '$tagName' created/updated to current commit\x1b[0m");
+}
+
 void _moveTagCommand(List<String> args) {
   if (args.length != 1) {
     print("\x1b[31mError: Please specify the tag name to move\x1b[0m");
@@ -623,6 +637,10 @@ void process(List<String> args) {
     case 'move-tag':
       _moveTagCommand(commandArgs);
       break;
+    case 'tag-today':
+      tagTodayCommand(commandArgs);
+      break;
+
     default:
       print("\x1b[31mError: Unknown command '$command'\x1b[0m");
       _printUsage();
