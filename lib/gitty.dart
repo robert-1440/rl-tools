@@ -435,6 +435,31 @@ void _commitCommand(List<String> args) {
   print(result.stdout);
 }
 
+void _moveTagCommand(List<String> args) {
+  if (args.length != 1) {
+    print("\x1b[31mError: Please specify the tag name to move\x1b[0m");
+    print("Usage: gitty move-tag <tag-name>");
+    exit(1);
+  }
+
+  final tagName = args[0];
+  _executeGit(['tag', '-d', tagName]);
+  _executeGit(['push', 'origin', ':refs/tags/$tagName']);
+  _executeGit(['tag', tagName]);
+  _executeGit(['push', 'origin', tagName]);
+
+  print("\x1b[32mTag '$tagName' moved to current commit\x1b[0m");
+}
+
+void _executeGit(List<String> args) {
+  final result = Process.runSync('git', args);
+  if (result.exitCode != 0) {
+    print("\x1b[31mError: Git command failed\x1b[0m");
+    print(result.stderr);
+    exit(1);
+  }
+}
+
 void _projectsCommand(List<String> args) {
   if (args.isEmpty) {
     print("Usage: gitty projects <action>");
@@ -594,6 +619,9 @@ void process(List<String> args) {
       break;
     case 'projects':
       _projectsCommand(commandArgs);
+      break;
+    case 'move-tag':
+      _moveTagCommand(commandArgs);
       break;
     default:
       print("\x1b[31mError: Unknown command '$command'\x1b[0m");
