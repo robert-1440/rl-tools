@@ -448,7 +448,7 @@ void tagTodayCommand(List<String> args) {
     print("\x1b[31mError: You must be on the 'main' branch to use tag-today\x1b[0m");
     exit(1);
   }
-  
+
   final date = DateTime.now();
   final tagName = "v${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}";
   print("Creating/updating tag '$tagName' to current commit...");

@@ -6,6 +6,7 @@ import 'package:rl_tools/src/cli/util.dart';
 
 var apply = false;
 var verbose = false;
+var quiet = false;
 
 class FolderEntry {
   final Directory directory;
@@ -28,6 +29,9 @@ Future<Execution> executeGit(List<String> options) async {
 }
 
 void warn(String message) {
+  if (quiet) {
+    return;
+  }
   stderr.writeln("Warning: $message");
 }
 
@@ -121,6 +125,10 @@ Future<void> processFolder(Directory dir) async {
     }
     var status = await gitStatus();
     if (status != null) {
+      if (quiet) {
+        print("> ${dir.path}: [${status.branch}] count: ${status.fileList.length}\n");
+        return;
+      }
       print("Repo: ${dir.path}");
       print("Branch: ${status.branch}");
       print("Files:");
@@ -133,7 +141,6 @@ Future<void> processFolder(Directory dir) async {
         print(" > No changes.");
       }
     }
-
   } finally {
     Directory.current = current;
   }
@@ -152,10 +159,12 @@ Future<void> process(FolderEntry entry) async {
 }
 
 void main(List<String> args) async {
-  var cli = CommandLineProcessor(args, usage: "${getOurExecutableName()} [--apply]");
+  var cli = CommandLineProcessor(args,
+      usage: "${getOurExecutableName()} [--apply] [-v|--v] [--quiet|-q]\nUsed to check git status in multiple locations.");
 
   apply = cli.hasOptionalArg("--apply");
   verbose = cli.hasOptionalArg("-v") || cli.hasOptionalArg("--v");
+  quiet = cli.hasOptionalArg("--quiet") || cli.hasOptionalArg("-q");
   cli.assertNoMore();
 
   var dirs = loadFolderEntries();
