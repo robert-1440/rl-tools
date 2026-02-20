@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:rl_tools/src/cli/util.dart';
@@ -441,6 +442,13 @@ void tagTodayCommand(List<String> args) {
     print("Usage: gitty tag-today");
     exit(1);
   }
+  // Ensure the current branch is main
+  String s = _executeGit(['branch', '--show-current']).trim();
+  if (s != 'main') {
+    print("\x1b[31mError: You must be on the 'main' branch to use tag-today\x1b[0m");
+    exit(1);
+  }
+  
   final date = DateTime.now();
   final tagName = "v${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}";
   print("Creating/updating tag '$tagName' to current commit...");
@@ -465,13 +473,14 @@ void _moveTagCommand(List<String> args) {
   print("\x1b[32mTag '$tagName' moved to current commit\x1b[0m");
 }
 
-void _executeGit(List<String> args) {
-  final result = Process.runSync('git', args);
+String _executeGit(List<String> args) {
+  final result = Process.runSync('git', args, stdoutEncoding: utf8);
   if (result.exitCode != 0) {
     print("\x1b[31mError: Git command failed\x1b[0m");
     print(result.stderr);
     exit(1);
   }
+  return result.stdout.toString();
 }
 
 void _projectsCommand(List<String> args) {
@@ -594,6 +603,8 @@ void _printUsage() {
   print("  add <file1> [file2] ...             Add files to project allowlist");
   print("  rm <file1> [file2] ...              Remove files from project allowlist");
   print("  commit <message>                    Commit staged changes");
+  print("  tag-today                           Create/update tag for today (vYYYY-MM-DD). Pushes to origin.");
+  print("  move-tag <tag-name>                 Move specified tag to current commit");
   print("  projects <action>                   Manage projects");
   print("");
   print("Project actions:");
