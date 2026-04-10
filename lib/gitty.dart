@@ -374,7 +374,20 @@ void _rmCommand(List<String> args) {
   }
 }
 
+// Options that can be used with 'git commit' that we want to ignore when parsing the commit message
+final List<String> _commitOptions = ['-am', '-m'];
+
+void _removeOptions(List<String> args) {
+  for (var option in _commitOptions) {
+    var index = args.indexOf(option);
+    if (index > -1) {
+      args.removeAt(index);
+    }
+  }
+}
+
 void _commitCommand(List<String> args) {
+  _removeOptions(args);
   if (args.isEmpty) {
     print("\x1b[31mError: Please specify a commit message\x1b[0m");
     print("Usage: gitty commit <message>");
