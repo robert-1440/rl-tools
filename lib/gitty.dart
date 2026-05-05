@@ -470,6 +470,49 @@ void tagTodayCommand(List<String> args) {
   print("\x1b[32mTag '$tagName' created/updated to current commit\x1b[0m");
 }
 
+void snapshotCommand(List<String> args) {
+  if (args.isNotEmpty) {
+    print("\x1b[31mError: snapshot command does not take any arguments\x1b[0m");
+    print("Usage: gitty snapshot");
+    exit(1);
+  }
+
+  final currentBranch = _executeGit(['branch', '--show-current']).trim();
+  if (currentBranch.isEmpty) {
+    print("\x1b[31mError: Not on any branch (detached HEAD)\x1b[0m");
+    exit(1);
+  }
+
+  final currentSha = _executeGit(['rev-parse', 'HEAD']).trim();
+
+  final date = DateTime.now();
+  final datePart = "${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}";
+  final baseName = "snapshots/$datePart";
+  var branchName = baseName;
+
+  var suffix = 0;
+  while (true) {
+    final result = Process.runSync('git', ['rev-parse', '--verify', branchName]);
+    if (result.exitCode != 0) {
+      break;
+    }
+    final existingSha = result.stdout.toString().trim();
+    if (existingSha == currentSha) {
+      print("Snapshot branch '$branchName' already exists at the same commit");
+      return;
+    }
+    suffix++;
+    branchName = "${baseName}_$suffix";
+  }
+
+  _executeGit(['checkout', '-b', branchName]);
+  _executeGit(['push', '-u', 'origin', branchName]);
+  _executeGit(['checkout', currentBranch]);
+
+  print("\x1b[32mSnapshot branch '$branchName' created and pushed to origin\x1b[0m");
+}
+
+
 void _moveTagCommand(List<String> args) {
   if (args.length != 1) {
     print("\x1b[31mError: Please specify the tag name to move\x1b[0m");
@@ -617,6 +660,7 @@ void _printUsage() {
   print("  rm <file1> [file2] ...              Remove files from project allowlist");
   print("  commit <message>                    Commit staged changes");
   print("  tag-today                           Create/update tag for today (vYYYY-MM-DD). Pushes to origin.");
+  print("  snapshot                            Create a snapshot branch (snapshots/YYYY-MM-DD). Pushes to origin.");
   print("  move-tag <tag-name>                 Move specified tag to current commit");
   print("  projects <action>                   Manage projects");
   print("");
@@ -663,6 +707,9 @@ void process(List<String> args) {
       break;
     case 'tag-today':
       tagTodayCommand(commandArgs);
+      break;
+    case 'snapshot':
+      snapshotCommand(commandArgs);
       break;
 
     default:
