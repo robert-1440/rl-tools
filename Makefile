@@ -5,11 +5,15 @@ CLI=$(SRC)cli/
 BIN=~/bin/
 CSV=$(SRC)support/csv/
 
-STANDARD=pubspec.yaml $(CLI)processor.dart $(CLI)mapper.dart $(CLI)util.dart
+STANDARD=pubspec.yaml $(CLI)processor.dart $(CLI)mapper.dart $(CLI)util.dart $(DIST)
+
 
 .PHONY: all tests ggrep gitcheck check_imports mkd mkenv ee gitty
 
 all: tests build
+
+$(DIST):
+	@mkdir -p $(DIST)
 
 tests:
 	@dart test test
