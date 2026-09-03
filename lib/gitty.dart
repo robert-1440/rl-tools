@@ -650,6 +650,236 @@ void _projectsRmCommand(GittyConfig config, List<String> args) {
   print("\x1b[32mRemoved project ${project.path} from tracking\x1b[0m");
 }
 
+/// A reference to a pull request on a GitHub (or GitHub Enterprise) host.
+class PrRef {
+  final String host;
+  final String owner;
+  final String repo;
+  final int number;
+
+  PrRef(this.host, this.owner, this.repo, this.number);
+
+  /// The value to pass to gh's `-R` flag: `[HOST/]OWNER/REPO`.
+  String get ghRepo => host == 'github.com' ? '$owner/$repo' : '$host/$owner/$repo';
+
+  String get url => 'https://$host/$owner/$repo/pull/$number';
+
+  @override
+  String toString() => '$ghRepo#$number';
+}
+
+final RegExp _prUrlPattern = RegExp(
+  r'^(?:https?://)?(?:www\.)?([A-Za-z0-9.-]+\.[A-Za-z]{2,})/'
+  r'([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)/pull/(\d+)(?:[/?#].*)?$',
+);
+
+final RegExp _shortPattern = RegExp(
+  r'^([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)(?:#|/pull/)(\d+)$',
+);
+
+/// Parses a pull request reference. Accepts a full PR URL
+/// (`https://github.com/owner/repo/pull/123`, with or without scheme and with
+/// trailing path/query/fragment), or the short forms `owner/repo#123` and
+/// `owner/repo/pull/123`. Returns null if the text is not recognized.
+PrRef? parsePrRef(String text) {
+  final input = text.trim();
+  if (input.isEmpty) {
+    return null;
+  }
+
+  var match = _prUrlPattern.firstMatch(input);
+  if (match != null) {
+    return PrRef(match.group(1)!, match.group(2)!, match.group(3)!, int.parse(match.group(4)!));
+  }
+
+  match = _shortPattern.firstMatch(input);
+  if (match != null) {
+    return PrRef('github.com', match.group(1)!, match.group(2)!, int.parse(match.group(3)!));
+  }
+
+  return null;
+}
+
+ProcessResult _runGh(List<String> args, {String? workingDirectory}) {
+  try {
+    return Process.runSync('gh', args, workingDirectory: workingDirectory, stdoutEncoding: utf8, stderrEncoding: utf8);
+  } on ProcessException catch (e) {
+    print("\x1b[31mError: Unable to run 'gh': ${e.message}\x1b[0m");
+    print("The GitHub CLI is required. See https://cli.github.com/");
+    exit(1);
+  }
+}
+
+/// Runs gh, forwarding its output, and exits on failure. [onFailure] runs
+/// before exiting, giving the caller a chance to clean up.
+void _execGh(List<String> args, String failureMessage, {String? workingDirectory, void Function()? onFailure}) {
+  final result = _runGh(args, workingDirectory: workingDirectory);
+  final out = result.stdout.toString().trim();
+  final err = result.stderr.toString().trim();
+  if (out.isNotEmpty) {
+    print(out);
+  }
+  if (result.exitCode != 0) {
+    print("\x1b[31m$failureMessage\x1b[0m");
+    if (err.isNotEmpty) {
+      print(err);
+    }
+    onFailure?.call();
+    exit(1);
+  }
+  if (err.isNotEmpty) {
+    print(err);
+  }
+}
+
+bool _isEmptyDir(Directory dir) => dir.listSync().isEmpty;
+
+String _joinPath(List<String> parts) => parts.where((p) => p.isNotEmpty).join(separatorChar);
+
+/// Creates [dir] and any missing parents, returning the directories that were
+/// actually created, outermost first, so they can be removed again on failure.
+List<Directory> _createDirTracked(Directory dir) {
+  final created = <Directory>[];
+  for (var d = dir; !d.existsSync(); d = d.parent) {
+    created.insert(0, d);
+    if (d.parent.path == d.path) break;
+  }
+  dir.createSync(recursive: true);
+  return created;
+}
+
+/// Removes directories created by [_createDirTracked], innermost first, but
+/// only while they are still empty.
+void _removeIfEmpty(List<Directory> dirs) {
+  for (final dir in dirs.reversed) {
+    if (!dir.existsSync() || !_isEmptyDir(dir)) return;
+    dir.deleteSync();
+  }
+}
+
+void _clonePrCommand(List<String> args) {
+  final positional = <String>[];
+  for (final arg in args) {
+    if (arg == '-h' || arg == '--help') {
+      _printClonePrUsage();
+      return;
+    }
+    if (arg.startsWith('-')) {
+      print("\x1b[31mError: Unknown option '$arg'\x1b[0m");
+      _printClonePrUsage();
+      exit(1);
+    }
+    positional.add(arg);
+  }
+
+  if (positional.isEmpty) {
+    print("\x1b[31mError: Please specify a pull request URL\x1b[0m");
+    _printClonePrUsage();
+    exit(1);
+  }
+  if (positional.length > 2) {
+    print("\x1b[31mError: Too many arguments\x1b[0m");
+    _printClonePrUsage();
+    exit(1);
+  }
+
+  final ref = parsePrRef(positional[0]);
+  if (ref == null) {
+    print("\x1b[31mError: '${positional[0]}' is not a recognized pull request reference\x1b[0m");
+    print("Expected something like https://github.com/owner/repo/pull/123 or owner/repo#123");
+    exit(1);
+  }
+
+  // Lay the clone out as <base>/<owner>/PR-<number>/<repo>.
+  final baseDir = positional.length > 1 ? checkHomeInPath(positional[1]) : '';
+  final prDir = _joinPath([baseDir, ref.owner, 'PR-${ref.number}']);
+  final targetDir = _joinPath([prDir, ref.repo]);
+
+  if (File(targetDir).existsSync()) {
+    print("\x1b[31mError: '$targetDir' already exists and is not a directory\x1b[0m");
+    exit(1);
+  }
+  final dir = Directory(targetDir);
+  if (dir.existsSync() && !_isEmptyDir(dir)) {
+    print("\x1b[31mError: Directory '$targetDir' already exists and is not empty\x1b[0m");
+    exit(1);
+  }
+
+  // Look up the PR first so we fail fast on a bad reference or missing auth.
+  final view = _runGh([
+    'pr',
+    'view',
+    '${ref.number}',
+    '-R',
+    ref.ghRepo,
+    '--json',
+    'number,title,state,headRefName,baseRefName,isCrossRepository,author,url',
+  ]);
+  if (view.exitCode != 0) {
+    print("\x1b[31mError: Unable to read pull request ${ref.url}\x1b[0m");
+    final err = view.stderr.toString().trim();
+    if (err.isNotEmpty) {
+      print(err);
+    }
+    exit(1);
+  }
+
+  final pr = jsonDecode(view.stdout.toString()) as Map<String, dynamic>;
+  final title = pr['title'] as String? ?? '';
+  final state = pr['state'] as String? ?? '';
+  final headRef = pr['headRefName'] as String? ?? '';
+  final baseRef = pr['baseRefName'] as String? ?? '';
+  final author = (pr['author'] as Map<String, dynamic>?)?['login'] as String? ?? '';
+
+  print("Pull request \x1b[32m${ref.ghRepo}#${ref.number}\x1b[0m: $title");
+  showMap({
+    'Author': author,
+    'State': state,
+    'Branch': headRef,
+    'Base': baseRef,
+    'Fork': pr['isCrossRepository'] == true ? 'yes' : 'no',
+  }, separator: ':');
+
+  if (state != 'OPEN') {
+    print("\x1b[33mNote: pull request is $state\x1b[0m");
+  }
+
+  final created = _createDirTracked(Directory(prDir));
+  void cleanup() => _removeIfEmpty(created);
+
+  print("Cloning ${ref.ghRepo} into '$targetDir'...");
+  _execGh(['repo', 'clone', ref.ghRepo, targetDir], 'Error: Clone failed', onFailure: cleanup);
+
+  print("Checking out pull request ${ref.number}...");
+  // 'gh pr checkout' creates the local branch and, for fork PRs, wires up the
+  // remote/refspec needed to track it.
+  _execGh(['pr', 'checkout', '${ref.number}'], 'Error: Checkout failed', workingDirectory: targetDir);
+
+  final branch = Process.runSync('git', ['branch', '--show-current'],
+          workingDirectory: targetDir, stdoutEncoding: utf8)
+      .stdout
+      .toString()
+      .trim();
+
+  print("\x1b[32mReady: $targetDir on branch '${branch.isEmpty ? headRef : branch}'\x1b[0m");
+}
+
+void _printClonePrUsage() {
+  print("Usage: gitty clone-pr <pr-url> [base-dir]");
+  print("");
+  print("Clones the pull request's repository and checks out its branch using gh,");
+  print("laid out as:");
+  print("");
+  print("  <base-dir>/<owner>/PR-<number>/<repo>");
+  print("");
+  print("Accepted references:");
+  print("  https://github.com/owner/repo/pull/123");
+  print("  github.com/owner/repo/pull/123");
+  print("  owner/repo#123");
+  print("");
+  print("The base directory defaults to the current directory.");
+}
+
 void _printUsage() {
   print("Usage: gitty <command> [options]");
   print("");
@@ -662,6 +892,7 @@ void _printUsage() {
   print("  tag-today                           Create/update tag for today (vYYYY-MM-DD). Pushes to origin.");
   print("  snapshot                            Create a snapshot branch (snapshots/YYYY-MM-DD). Pushes to origin.");
   print("  move-tag <tag-name>                 Move specified tag to current commit");
+  print("  clone-pr <pr-url> [base-dir]        Clone a PR into <owner>/PR-<num>/<repo> and check it out (requires gh)");
   print("  projects <action>                   Manage projects");
   print("");
   print("Project actions:");
@@ -710,6 +941,9 @@ void process(List<String> args) {
       break;
     case 'snapshot':
       snapshotCommand(commandArgs);
+      break;
+    case 'clone-pr':
+      _clonePrCommand(commandArgs);
       break;
 
     default:
