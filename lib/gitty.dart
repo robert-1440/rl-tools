@@ -880,6 +880,194 @@ void _printClonePrUsage() {
   print("The base directory defaults to the current directory.");
 }
 
+/// Options for the `squash` command.
+class SquashOptions {
+  final String message;
+  final String? base;
+  final bool force;
+  final bool help;
+
+  /// Set when the arguments could not be parsed; [message] is then empty.
+  final String? error;
+
+  SquashOptions({this.message = '', this.base, this.force = false, this.help = false, this.error});
+}
+
+/// Parses `squash` arguments: any number of message words plus the options
+/// `--base <branch>`, `-f`/`--force` and `-h`/`--help`. `-m`/`-am` are ignored
+/// so that a `git commit`-style invocation also works.
+SquashOptions parseSquashArgs(List<String> args) {
+  final words = <String>[];
+  String? base;
+  var force = false;
+
+  for (var i = 0; i < args.length; i++) {
+    final arg = args[i];
+    switch (arg) {
+      case '-h':
+      case '--help':
+        return SquashOptions(help: true);
+      case '-f':
+      case '--force':
+        force = true;
+        break;
+      case '-m':
+      case '-am':
+        break;
+      case '--base':
+        if (i + 1 >= args.length) {
+          return SquashOptions(error: "Option '--base' requires a branch name");
+        }
+        base = args[++i];
+        break;
+      default:
+        if (arg.startsWith('--base=')) {
+          base = arg.substring('--base='.length);
+          if (base.isEmpty) {
+            return SquashOptions(error: "Option '--base' requires a branch name");
+          }
+          break;
+        }
+        if (arg.startsWith('-') && arg.length > 1) {
+          return SquashOptions(error: "Unknown option '$arg'");
+        }
+        words.add(arg);
+    }
+  }
+
+  final message = words.join(' ').trim();
+  if (message.isEmpty) {
+    return SquashOptions(error: 'Please specify a commit message');
+  }
+  return SquashOptions(message: message, base: base, force: force);
+}
+
+/// Returns true if [ref] resolves to a commit in this repository.
+bool _refExists(String ref) {
+  final result = Process.runSync('git', ['rev-parse', '--verify', '--quiet', '$ref^{commit}']);
+  return result.exitCode == 0;
+}
+
+/// Finds the branch the current branch was cut from: the upstream of the
+/// current branch if it is a different branch, otherwise the first of
+/// `main`/`master` that exists locally.
+String? _findBaseBranch(String currentBranch) {
+  final upstream = Process.runSync('git', ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'],
+      stdoutEncoding: utf8);
+  if (upstream.exitCode == 0) {
+    final name = upstream.stdout.toString().trim();
+    // The upstream of a pushed branch is itself; that is no help as a base.
+    if (name.isNotEmpty && !name.endsWith('/$currentBranch')) {
+      return name;
+    }
+  }
+
+  for (final candidate in ['main', 'master']) {
+    if (candidate != currentBranch && _refExists(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+void _squashCommand(List<String> args) {
+  final options = parseSquashArgs(args);
+  if (options.help) {
+    _printSquashUsage();
+    return;
+  }
+  if (options.error != null) {
+    print("\x1b[31mError: ${options.error}\x1b[0m");
+    _printSquashUsage();
+    exit(1);
+  }
+
+  final currentBranch = _executeGit(['branch', '--show-current']).trim();
+  if (currentBranch.isEmpty) {
+    print("\x1b[31mError: Not on any branch (detached HEAD)\x1b[0m");
+    exit(1);
+  }
+
+  final base = options.base ?? _findBaseBranch(currentBranch);
+  if (base == null) {
+    print("\x1b[31mError: Unable to determine the base branch for '$currentBranch'\x1b[0m");
+    print("Use 'gitty squash --base <branch> <message>' to specify it");
+    exit(1);
+  }
+  if (base == currentBranch) {
+    print("\x1b[31mError: Base branch and current branch are both '$currentBranch'\x1b[0m");
+    exit(1);
+  }
+  if (!_refExists(base)) {
+    print("\x1b[31mError: Base branch '$base' not found\x1b[0m");
+    exit(1);
+  }
+
+  // Refuse to fold uncommitted work into the squashed commit.
+  final dirty = _getGitStatus().where((s) => !s.isUntracked).toList();
+  if (dirty.isNotEmpty) {
+    print("\x1b[31mError: There are uncommitted changes:\x1b[0m");
+    for (var status in dirty) {
+      print("  \x1b[31m• ${status.path}\x1b[0m");
+    }
+    print("Commit or stash them before squashing");
+    exit(1);
+  }
+
+  final mergeBase = _executeGit(['merge-base', base, 'HEAD']).trim();
+  final commits = _executeGit(['log', '--format=%h %s', '$mergeBase..HEAD'])
+      .split('\n')
+      .where((l) => l.trim().isNotEmpty)
+      .toList();
+
+  if (commits.isEmpty) {
+    print("\x1b[33mNo commits on '$currentBranch' since '$base' - nothing to squash\x1b[0m");
+    return;
+  }
+  if (commits.length == 1) {
+    print("\x1b[33mOnly one commit on '$currentBranch' since '$base' - nothing to squash\x1b[0m");
+    print("  ${commits[0]}");
+    return;
+  }
+
+  print("Squashing ${commits.length} commits on \x1b[32m$currentBranch\x1b[0m since \x1b[32m$base\x1b[0m:");
+  for (var commit in commits) {
+    print("  $commit");
+  }
+  print("Into: \x1b[32m${options.message}\x1b[0m");
+
+  if (!options.force) {
+    if (!promptYes("Squash these ${commits.length} commits")) {
+      print("Squash cancelled");
+      return;
+    }
+  }
+
+  _executeGit(['reset', '--soft', mergeBase]);
+  final result = Process.runSync('git', ['commit', '-m', options.message], stdoutEncoding: utf8);
+  if (result.exitCode != 0) {
+    print("\x1b[31mError: Git commit failed\x1b[0m");
+    print(result.stderr);
+    print("The branch has been soft reset to $mergeBase; your changes are staged.");
+    exit(1);
+  }
+
+  print("\x1b[32mSquashed ${commits.length} commits into one\x1b[0m");
+  print(result.stdout);
+  print("Note: history was rewritten; a pushed branch needs 'git push --force-with-lease'");
+}
+
+void _printSquashUsage() {
+  print("Usage: gitty squash <message> [--base <branch>] [-f]");
+  print("");
+  print("Squashes the commits the current branch has since its base branch into a");
+  print("single commit with the given message. Does nothing if there is only one.");
+  print("");
+  print("Options:");
+  print("  --base <branch>   Branch to squash against (default: upstream, else main/master)");
+  print("  -f, --force       Skip the confirmation prompt");
+}
+
 void _printUsage() {
   print("Usage: gitty <command> [options]");
   print("");
@@ -893,6 +1081,7 @@ void _printUsage() {
   print("  snapshot                            Create a snapshot branch (snapshots/YYYY-MM-DD). Pushes to origin.");
   print("  move-tag <tag-name>                 Move specified tag to current commit");
   print("  clone-pr <pr-url> [base-dir]        Clone a PR into <owner>/PR-<num>/<repo> and check it out (requires gh)");
+  print("  squash <message> [--base <branch>]  Squash the current branch's commits into one");
   print("  projects <action>                   Manage projects");
   print("");
   print("Project actions:");
@@ -944,6 +1133,9 @@ void process(List<String> args) {
       break;
     case 'clone-pr':
       _clonePrCommand(commandArgs);
+      break;
+    case 'squash':
+      _squashCommand(commandArgs);
       break;
 
     default:
