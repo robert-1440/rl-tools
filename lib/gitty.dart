@@ -761,13 +761,33 @@ void _removeIfEmpty(List<Directory> dirs) {
 Future<void> _clonePrCommand(List<String> args) async {
   final positional = <String>[];
   var launchClaude = false;
-  for (final arg in args) {
+  String? baseDirOption;
+  for (var i = 0; i < args.length; i++) {
+    final arg = args[i];
     if (arg == '-h' || arg == '--help') {
       _printClonePrUsage();
       return;
     }
     if (arg == '--claude') {
       launchClaude = true;
+      continue;
+    }
+    if (arg == '--dir') {
+      if (i + 1 >= args.length || args[i + 1].isEmpty) {
+        print("\x1b[31mError: --dir requires a directory\x1b[0m");
+        _printClonePrUsage();
+        exit(1);
+      }
+      baseDirOption = args[++i];
+      continue;
+    }
+    if (arg.startsWith('--dir=')) {
+      baseDirOption = arg.substring('--dir='.length);
+      if (baseDirOption.isEmpty) {
+        print("\x1b[31mError: --dir requires a directory\x1b[0m");
+        _printClonePrUsage();
+        exit(1);
+      }
       continue;
     }
     if (arg.startsWith('-')) {
@@ -783,8 +803,8 @@ Future<void> _clonePrCommand(List<String> args) async {
     _printClonePrUsage();
     exit(1);
   }
-  if (positional.length > 2) {
-    print("\x1b[31mError: Too many arguments\x1b[0m");
+  if (positional.length > 1) {
+    print("\x1b[31mError: Too many arguments (use --dir to choose the base directory)\x1b[0m");
     _printClonePrUsage();
     exit(1);
   }
@@ -796,22 +816,8 @@ Future<void> _clonePrCommand(List<String> args) async {
     exit(1);
   }
 
-  // Lay the clone out as <base>/<owner>/PR-<number>/<repo>.
-  final baseDir = positional.length > 1 ? checkHomeInPath(positional[1]) : '';
-  final prDir = _joinPath([baseDir, ref.owner, 'PR-${ref.number}']);
-  final targetDir = _joinPath([prDir, ref.repo]);
-
-  if (File(targetDir).existsSync()) {
-    print("\x1b[31mError: '$targetDir' already exists and is not a directory\x1b[0m");
-    exit(1);
-  }
-  final dir = Directory(targetDir);
-  if (dir.existsSync() && !_isEmptyDir(dir)) {
-    print("\x1b[31mError: Directory '$targetDir' already exists and is not empty\x1b[0m");
-    exit(1);
-  }
-
-  // Look up the PR first so we fail fast on a bad reference or missing auth.
+  // Look up the PR first: it fails fast on a bad reference or missing auth,
+  // and the author decides where the clone goes.
   final view = _runGh([
     'pr',
     'view',
@@ -850,6 +856,26 @@ Future<void> _clonePrCommand(List<String> args) async {
     print("\x1b[33mNote: pull request is $state\x1b[0m");
   }
 
+  // Lay the clone out as <base>/<owner>/PR-<number>/<repo>, where the base
+  // defaults to ~/review-repos/<author>.
+  if (baseDirOption == null && !RegExp(r'^[A-Za-z0-9._-]+$').hasMatch(author)) {
+    print("\x1b[31mError: Unable to determine the pull request's author; use --dir to choose the base directory\x1b[0m");
+    exit(1);
+  }
+  final baseDir = checkHomeInPath(baseDirOption ?? '~/review-repos/$author');
+  final prDir = _joinPath([baseDir, ref.owner, 'PR-${ref.number}']);
+  final targetDir = _joinPath([prDir, ref.repo]);
+
+  if (File(targetDir).existsSync()) {
+    print("\x1b[31mError: '$targetDir' already exists and is not a directory\x1b[0m");
+    exit(1);
+  }
+  final dir = Directory(targetDir);
+  if (dir.existsSync() && !_isEmptyDir(dir)) {
+    print("\x1b[31mError: Directory '$targetDir' already exists and is not empty\x1b[0m");
+    exit(1);
+  }
+
   final created = _createDirTracked(Directory(prDir));
   void cleanup() => _removeIfEmpty(created);
 
@@ -870,15 +896,14 @@ Future<void> _clonePrCommand(List<String> args) async {
   print("\x1b[32mReady: $targetDir on branch '${branch.isEmpty ? headRef : branch}'\x1b[0m");
 
   if (launchClaude) {
-    await _launchClaude(targetDir, ref.number);
+    await _launchClaudeForPr(targetDir, ref.number);
   }
 }
 
-/// Runs `claude` in [dir] attached to this terminal, then exits with claude's
-/// exit code. The session gets an ID chosen here so that a `resume.sh` next to
-/// the repository can pick the review back up later, after first updating the
-/// checkout to the pull request's latest commits.
-Future<void> _launchClaude(String dir, int prNumber) async {
+/// Runs `claude` in [dir] with a session ID chosen here, first writing a
+/// `resume.sh` next to the repository that updates the checkout to the pull
+/// request's latest commits and picks the session back up.
+Future<void> _launchClaudeForPr(String dir, int prNumber) async {
   final sessionId = _randomUuid();
   final resumeScript = File(_joinPath([Directory(dir).parent.path, 'resume.sh']));
   resumeScript.writeAsStringSync('#!/bin/sh\n'
@@ -888,11 +913,16 @@ Future<void> _launchClaude(String dir, int prNumber) async {
   Process.runSync('chmod', ['+x', resumeScript.path]);
   print("Wrote '${resumeScript.path}' to resume this session");
 
+  await _launchClaude(dir, ['--session-id', sessionId]);
+}
+
+/// Runs `claude` in [dir] attached to this terminal, then exits with claude's
+/// exit code.
+Future<void> _launchClaude(String dir, [List<String> args = const []]) async {
   print("Starting 'claude' in '$dir'...");
   final Process process;
   try {
-    process = await Process.start('claude', ['--session-id', sessionId],
-        workingDirectory: dir, mode: ProcessStartMode.inheritStdio);
+    process = await Process.start('claude', args, workingDirectory: dir, mode: ProcessStartMode.inheritStdio);
   } on ProcessException catch (e) {
     print("\x1b[31mError: Unable to start claude: ${e.message}\x1b[0m");
     exit(1);
@@ -917,7 +947,7 @@ String _randomUuid() {
 String _shellQuote(String value) => "'${value.replaceAll("'", "'\\''")}'";
 
 void _printClonePrUsage() {
-  print("Usage: gitty clone-pr [--claude] <pr-url> [base-dir]");
+  print("Usage: gitty clone-pr [--dir <dir>] [--claude] <pr-url>");
   print("");
   print("Clones the pull request's repository and checks out its branch using gh,");
   print("laid out as:");
@@ -929,14 +959,204 @@ void _printClonePrUsage() {
   print("  github.com/owner/repo/pull/123");
   print("  owner/repo#123");
   print("");
-  print("The base directory defaults to the current directory.");
+  print("The base directory defaults to ~/review-repos/<author>, where <author> is");
+  print("the pull request author's GitHub login.");
   print("");
   print("Options:");
+  print("  --dir <dir> Use <dir> as the base directory instead.");
   print("  --claude    After checkout, run 'claude' in the cloned repository;");
   print("              gitty exits when claude does. Also writes an executable");
   print("              <base-dir>/<owner>/PR-<number>/resume.sh that updates the");
   print("              checkout to the PR's latest commits and resumes that");
   print("              claude session.");
+}
+
+/// The repository a git remote URL points at.
+class RemoteRepo {
+  final String host;
+
+  /// The organization or user; for hosts with nested groups, the full group
+  /// path (`group/subgroup`).
+  final String owner;
+  final String repo;
+
+  RemoteRepo(this.host, this.owner, this.repo);
+
+  @override
+  String toString() => '$host/$owner/$repo';
+}
+
+final RegExp _scpRemotePattern = RegExp(r'^(?:[^@/]+@)?([^:/]+):(?!//)(.+)$');
+final RegExp _urlRemotePattern = RegExp(r'^[A-Za-z][A-Za-z0-9+.-]*://(?:[^@/]+@)?([^/:]+)(?::\d+)?/(.+)$');
+
+/// Parses a git remote URL: `https://host/owner/repo.git`,
+/// `ssh://git@host[:port]/owner/repo.git`, or the scp-like
+/// `git@host:owner/repo.git`. Returns null if it has no owner/repo path.
+RemoteRepo? parseRemoteUrl(String url) {
+  final input = url.trim();
+  final match = _urlRemotePattern.firstMatch(input) ?? _scpRemotePattern.firstMatch(input);
+  if (match == null) {
+    return null;
+  }
+
+  var path = match.group(2)!;
+  while (path.endsWith('/')) {
+    path = path.substring(0, path.length - 1);
+  }
+  if (path.endsWith('.git')) {
+    path = path.substring(0, path.length - 4);
+  }
+  final parts = path.split('/').where((p) => p.isNotEmpty).toList();
+  if (parts.length < 2 || parts.any((p) => p == '.' || p == '..')) {
+    return null;
+  }
+  return RemoteRepo(match.group(1)!, parts.sublist(0, parts.length - 1).join('/'), parts.last);
+}
+
+/// Runs git in the current directory, returning its trimmed stdout, or null
+/// if it fails.
+String? _gitOutput(List<String> args) {
+  final result = Process.runSync('git', args, stdoutEncoding: utf8, stderrEncoding: utf8);
+  return result.exitCode == 0 ? result.stdout.toString().trim() : null;
+}
+
+Never _fail(String message) {
+  print("\x1b[31mError: $message\x1b[0m");
+  exit(1);
+}
+
+Future<void> _cloneBranchCommand(List<String> args) async {
+  var launchClaude = false;
+  var replaceExisting = false;
+  for (final arg in args) {
+    if (arg == '-h' || arg == '--help') {
+      _printCloneBranchUsage();
+      return;
+    }
+    if (arg == '--claude') {
+      launchClaude = true;
+      continue;
+    }
+    if (arg == '-d') {
+      replaceExisting = true;
+      continue;
+    }
+    print("\x1b[31mError: Unknown ${arg.startsWith('-') ? 'option' : 'argument'} '$arg'\x1b[0m");
+    _printCloneBranchUsage();
+    exit(1);
+  }
+
+  if (_gitOutput(['rev-parse', '--show-toplevel']) == null) {
+    _fail("Not inside a git repository");
+  }
+
+  final branch = _gitOutput(['branch', '--show-current']) ?? '';
+  if (branch.isEmpty) {
+    _fail("HEAD is detached; check out the branch to clone first");
+  }
+  if (_gitOutput(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}']) == null) {
+    _fail("Branch '$branch' has no commits");
+  }
+
+  // The branch's upstream says both which repository to clone and which
+  // branch there to check out (it need not share the local branch's name).
+  final remote = _gitOutput(['config', '--get', 'branch.$branch.remote']);
+  final mergeRef = _gitOutput(['config', '--get', 'branch.$branch.merge']);
+  if (remote == null || mergeRef == null) {
+    _fail("Branch '$branch' has not been pushed (it has no upstream branch)");
+  }
+  if (remote == '.') {
+    _fail("Branch '$branch' tracks a local branch, so there is no repository to clone");
+  }
+  final remoteBranch = mergeRef.replaceFirst(RegExp(r'^refs/heads/'), '');
+
+  // The URL as configured, before any insteadOf rewriting; git clone applies
+  // that itself.
+  final remoteUrl = _gitOutput(['config', '--get', 'remote.$remote.url']);
+  if (remoteUrl == null) {
+    _fail("Unable to find the URL of remote '$remote'");
+  }
+  final repo = parseRemoteUrl(remoteUrl);
+  if (repo == null) {
+    _fail("Unable to determine the repository from remote '$remote' ($remoteUrl)");
+  }
+
+  final upstream = '$remote/$remoteBranch';
+  if (_gitOutput(['rev-parse', '--verify', '--quiet', '@{upstream}^{commit}']) == null) {
+    _fail("Upstream branch '$upstream' no longer exists; push '$branch' first");
+  }
+  final unpushed = int.parse(_gitOutput(['rev-list', '--count', '@{upstream}..HEAD']) ?? '0');
+  if (unpushed > 0) {
+    _fail("Branch '$branch' has $unpushed commit${unpushed == 1 ? '' : 's'} not pushed to '$upstream'");
+  }
+
+  // A branch with nothing beyond the default branch has nothing to review.
+  final defaultBranch = _gitOutput(['symbolic-ref', '--quiet', '--short', 'refs/remotes/$remote/HEAD']);
+  if (defaultBranch == upstream) {
+    _fail("Branch '$branch' is the default branch of '$remote'; there is nothing to review");
+  }
+  if (defaultBranch != null && _gitOutput(['rev-list', '--count', '$defaultBranch..HEAD']) == '0') {
+    _fail("Branch '$branch' has no commits that are not already on '$defaultBranch'");
+  }
+
+  if ((_gitOutput(['status', '--porcelain']) ?? '').isNotEmpty) {
+    print("\x1b[33mNote: uncommitted changes in this working tree will not be in the clone\x1b[0m");
+  }
+
+  // Like clone-pr's <owner>/PR-<number>/<repo>. A branch name with slashes
+  // nests; git itself keeps such names from colliding (no 'a' next to 'a/b').
+  final branchDir = _joinPath([checkHomeInPath('~/review-repos/local'), repo.owner, remoteBranch]);
+  final targetDir = _joinPath([branchDir, repo.repo]);
+  if (File(targetDir).existsSync()) {
+    _fail("'$targetDir' already exists and is not a directory");
+  }
+  final dir = Directory(targetDir);
+  if (dir.existsSync() && !replaceExisting && !_isEmptyDir(dir)) {
+    _fail("Directory '$targetDir' already exists and is not empty (use -d to replace it)");
+  }
+
+  print("Branch \x1b[32m$upstream\x1b[0m of $repo");
+  if (dir.existsSync() && replaceExisting) {
+    print("Deleting existing '$targetDir'...");
+    dir.deleteSync(recursive: true);
+  }
+  final created = _createDirTracked(Directory(branchDir));
+
+  print("Cloning $remoteUrl into '$targetDir'...");
+  final clone = Process.runSync('git', ['clone', '--branch', remoteBranch, remoteUrl, targetDir],
+      stdoutEncoding: utf8, stderrEncoding: utf8);
+  if (clone.exitCode != 0) {
+    print("\x1b[31mError: Clone failed\x1b[0m");
+    final err = clone.stderr.toString().trim();
+    if (err.isNotEmpty) {
+      print(err);
+    }
+    _removeIfEmpty(created);
+    exit(1);
+  }
+
+  print("\x1b[32mReady: $targetDir on branch '$remoteBranch'\x1b[0m");
+
+  if (launchClaude) {
+    await _launchClaude(targetDir);
+  }
+}
+
+void _printCloneBranchUsage() {
+  print("Usage: gitty clone-branch [-d] [--claude]");
+  print("");
+  print("Clones the repository the current branch is pushed to and checks out that");
+  print("branch, laid out as:");
+  print("");
+  print("  ~/review-repos/local/<owner>/<branch>/<repo>");
+  print("");
+  print("Fails if the current branch has no commits of its own, has not been");
+  print("pushed, or has commits that have not been pushed.");
+  print("");
+  print("Options:");
+  print("  -d          Delete the target directory first if it already exists.");
+  print("  --claude    After checkout, run 'claude' in the cloned repository;");
+  print("              gitty exits when claude does.");
 }
 
 /// Options for the `squash` command.
@@ -1139,8 +1359,9 @@ void _printUsage() {
   print("  tag-today                           Create/update tag for today (vYYYY-MM-DD). Pushes to origin.");
   print("  snapshot                            Create a snapshot branch (snapshots/YYYY-MM-DD). Pushes to origin.");
   print("  move-tag <tag-name>                 Move specified tag to current commit");
-  print("  clone-pr <pr-url> [base-dir]        Clone a PR into <owner>/PR-<num>/<repo> and check it out (requires gh)");
+  print("  clone-pr <pr-url> [--dir <dir>]     Clone a PR into ~/review-repos/<author>/<owner>/PR-<num>/<repo> (requires gh)");
   print("           [--claude]                 ...then run claude in it (writes ../resume.sh)");
+  print("  clone-branch [-d] [--claude]        Clone the current (pushed) branch into ~/review-repos/local/<owner>/<branch>/<repo>");
   print("  squash <message> [--base <branch>]  Squash the current branch's commits into one");
   print("  projects <action>                   Manage projects");
   print("");
@@ -1193,6 +1414,9 @@ void process(List<String> args) {
       break;
     case 'clone-pr':
       _clonePrCommand(commandArgs);
+      break;
+    case 'clone-branch':
+      _cloneBranchCommand(commandArgs);
       break;
     case 'squash':
       _squashCommand(commandArgs);

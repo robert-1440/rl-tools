@@ -2,6 +2,44 @@ import 'package:rl_tools/gitty.dart';
 import 'package:test/test.dart';
 
 void main() {
+  group('parseRemoteUrl', () {
+    void expectRepo(String input, String host, String owner, String repo) {
+      final parsed = parseRemoteUrl(input);
+      expect(parsed, isNotNull, reason: "failed to parse '$input'");
+      expect(parsed!.host, host);
+      expect(parsed.owner, owner);
+      expect(parsed.repo, repo);
+    }
+
+    test('parses https urls, with or without .git', () {
+      expectRepo('https://github.com/rlibby/rl-tools.git', 'github.com', 'rlibby', 'rl-tools');
+      expectRepo('https://github.com/rlibby/rl-tools', 'github.com', 'rlibby', 'rl-tools');
+      expectRepo('https://user@github.com/rlibby/rl-tools/', 'github.com', 'rlibby', 'rl-tools');
+    });
+
+    test('parses ssh urls, including a port', () {
+      expectRepo('ssh://git@github.com/rlibby/rl-tools.git', 'github.com', 'rlibby', 'rl-tools');
+      expectRepo('ssh://git@git.example.com:2222/o/r.git', 'git.example.com', 'o', 'r');
+    });
+
+    test('parses scp-like urls', () {
+      expectRepo('git@github.com:rlibby/rl-tools.git', 'github.com', 'rlibby', 'rl-tools');
+      expectRepo('github.com:rlibby/rl-tools', 'github.com', 'rlibby', 'rl-tools');
+    });
+
+    test('keeps nested group paths as the owner', () {
+      expectRepo('https://gitlab.com/group/sub/repo.git', 'gitlab.com', 'group/sub', 'repo');
+    });
+
+    test('rejects urls without an owner and repo', () {
+      expect(parseRemoteUrl('https://github.com/rl-tools.git'), isNull);
+      expect(parseRemoteUrl('/local/path/repo.git'), isNull);
+      expect(parseRemoteUrl('../repo'), isNull);
+      expect(parseRemoteUrl('https://github.com/../repo'), isNull);
+      expect(parseRemoteUrl(''), isNull);
+    });
+  });
+
   group('parsePrRef', () {
     void expectRef(String input, String host, String owner, String repo, int number) {
       final ref = parsePrRef(input);
