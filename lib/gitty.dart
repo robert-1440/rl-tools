@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:rl_tools/src/cli/util.dart';
 import 'package:yaml/yaml.dart';
@@ -757,12 +758,17 @@ void _removeIfEmpty(List<Directory> dirs) {
   }
 }
 
-void _clonePrCommand(List<String> args) {
+Future<void> _clonePrCommand(List<String> args) async {
   final positional = <String>[];
+  var launchClaude = false;
   for (final arg in args) {
     if (arg == '-h' || arg == '--help') {
       _printClonePrUsage();
       return;
+    }
+    if (arg == '--claude') {
+      launchClaude = true;
+      continue;
     }
     if (arg.startsWith('-')) {
       print("\x1b[31mError: Unknown option '$arg'\x1b[0m");
@@ -862,10 +868,56 @@ void _clonePrCommand(List<String> args) {
       .trim();
 
   print("\x1b[32mReady: $targetDir on branch '${branch.isEmpty ? headRef : branch}'\x1b[0m");
+
+  if (launchClaude) {
+    await _launchClaude(targetDir, ref.number);
+  }
 }
 
+/// Runs `claude` in [dir] attached to this terminal, then exits with claude's
+/// exit code. The session gets an ID chosen here so that a `resume.sh` next to
+/// the repository can pick the review back up later, after first updating the
+/// checkout to the pull request's latest commits.
+Future<void> _launchClaude(String dir, int prNumber) async {
+  final sessionId = _randomUuid();
+  final resumeScript = File(_joinPath([Directory(dir).parent.path, 'resume.sh']));
+  resumeScript.writeAsStringSync('#!/bin/sh\n'
+      'cd ${_shellQuote(Directory(dir).absolute.path)} || exit 1\n'
+      'gh pr checkout $prNumber --force || exit 1\n'
+      'exec claude --resume $sessionId "\$@"\n');
+  Process.runSync('chmod', ['+x', resumeScript.path]);
+  print("Wrote '${resumeScript.path}' to resume this session");
+
+  print("Starting 'claude' in '$dir'...");
+  final Process process;
+  try {
+    process = await Process.start('claude', ['--session-id', sessionId],
+        workingDirectory: dir, mode: ProcessStartMode.inheritStdio);
+  } on ProcessException catch (e) {
+    print("\x1b[31mError: Unable to start claude: ${e.message}\x1b[0m");
+    exit(1);
+  }
+  // Ctrl-C is claude's to handle; don't let it kill gitty out from under it.
+  ProcessSignal.sigint.watch().listen((_) {});
+  exit(await process.exitCode);
+}
+
+/// A random (version 4) UUID.
+String _randomUuid() {
+  final random = Random.secure();
+  final bytes = List<int>.generate(16, (_) => random.nextInt(256));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  final hex = bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+  return '${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-'
+      '${hex.substring(16, 20)}-${hex.substring(20)}';
+}
+
+/// Quotes [value] for use as a single word in a POSIX shell script.
+String _shellQuote(String value) => "'${value.replaceAll("'", "'\\''")}'";
+
 void _printClonePrUsage() {
-  print("Usage: gitty clone-pr <pr-url> [base-dir]");
+  print("Usage: gitty clone-pr [--claude] <pr-url> [base-dir]");
   print("");
   print("Clones the pull request's repository and checks out its branch using gh,");
   print("laid out as:");
@@ -878,6 +930,13 @@ void _printClonePrUsage() {
   print("  owner/repo#123");
   print("");
   print("The base directory defaults to the current directory.");
+  print("");
+  print("Options:");
+  print("  --claude    After checkout, run 'claude' in the cloned repository;");
+  print("              gitty exits when claude does. Also writes an executable");
+  print("              <base-dir>/<owner>/PR-<number>/resume.sh that updates the");
+  print("              checkout to the PR's latest commits and resumes that");
+  print("              claude session.");
 }
 
 /// Options for the `squash` command.
@@ -1081,6 +1140,7 @@ void _printUsage() {
   print("  snapshot                            Create a snapshot branch (snapshots/YYYY-MM-DD). Pushes to origin.");
   print("  move-tag <tag-name>                 Move specified tag to current commit");
   print("  clone-pr <pr-url> [base-dir]        Clone a PR into <owner>/PR-<num>/<repo> and check it out (requires gh)");
+  print("           [--claude]                 ...then run claude in it (writes ../resume.sh)");
   print("  squash <message> [--base <branch>]  Squash the current branch's commits into one");
   print("  projects <action>                   Manage projects");
   print("");
