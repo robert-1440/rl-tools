@@ -1159,6 +1159,420 @@ void _printCloneBranchUsage() {
   print("              gitty exits when claude does.");
 }
 
+/// One cloned pull request found under ~/review-repos, and what GitHub says
+/// about it now.
+class _ReviewedPr {
+  final Directory dir;
+  final String folder;
+  final int number;
+  final String url;
+  final String author;
+  final String status;
+
+  /// True once the pull request is merged or closed.
+  final bool finished;
+
+  _ReviewedPr(this.dir, this.folder, this.number, this.url, this.author, this.status, {this.finished = false});
+}
+
+final RegExp _prFolderPattern = RegExp(r'^PR-(\d+)$');
+
+/// Finds the `PR-<number>` folders under [root]. It does not descend into
+/// them, into git repositories, or into hidden folders.
+List<Directory> _findPrFolders(Directory root) {
+  final found = <Directory>[];
+  void walk(Directory dir) {
+    final List<FileSystemEntity> entries;
+    try {
+      entries = dir.listSync(followLinks: false);
+    } on FileSystemException {
+      return;
+    }
+    for (final entry in entries.whereType<Directory>()) {
+      final name = getName(entry);
+      if (name.startsWith('.')) continue;
+      if (_prFolderPattern.hasMatch(name)) {
+        found.add(entry);
+      } else if (!Directory(_joinPath([entry.path, '.git'])).existsSync()) {
+        walk(entry);
+      }
+    }
+  }
+
+  walk(root);
+  return found;
+}
+
+/// Describes a pull request's state for the review table: MERGED, CLOSED, or
+/// OPEN qualified by draft status or the review decision.
+String _describePrStatus(Map<String, dynamic> pr) {
+  final state = pr['state'] as String? ?? '';
+  if (state != 'OPEN') return state;
+  if (pr['isDraft'] == true) return 'OPEN (draft)';
+  switch (pr['reviewDecision']) {
+    case 'APPROVED':
+      return 'OPEN (approved)';
+    case 'CHANGES_REQUESTED':
+      return 'OPEN (changes requested)';
+    case 'REVIEW_REQUIRED':
+      return 'OPEN (review required)';
+  }
+  return state;
+}
+
+Future<_ReviewedPr> _checkPrFolder(Directory prDir, String displayFolder) async {
+  final number = int.parse(_prFolderPattern.firstMatch(getName(prDir))!.group(1)!);
+  _ReviewedPr result(String status, {String url = '', String author = '', bool finished = false}) =>
+      _ReviewedPr(prDir, displayFolder, number, url, author, status, finished: finished);
+
+  final clones = prDir
+      .listSync(followLinks: false)
+      .whereType<Directory>()
+      .where((d) => Directory(_joinPath([d.path, '.git'])).existsSync())
+      .toList()
+    ..sort((a, b) => a.path.compareTo(b.path));
+  if (clones.isEmpty) {
+    return result('error: no clone found');
+  }
+
+  final remote = await Process.run('git', ['config', '--get', 'remote.origin.url'],
+      workingDirectory: clones.first.path, stdoutEncoding: utf8);
+  final repo = remote.exitCode == 0 ? parseRemoteUrl(remote.stdout.toString()) : null;
+  if (repo == null) {
+    return result('error: no usable origin remote');
+  }
+  final ghRepo = repo.host == 'github.com' ? '${repo.owner}/${repo.repo}' : repo.toString();
+  final fallbackUrl = 'https://$repo/pull/$number';
+
+  final ProcessResult view;
+  try {
+    view = await Process.run(
+        'gh', ['pr', 'view', '$number', '-R', ghRepo, '--json', 'url,author,state,isDraft,reviewDecision'],
+        stdoutEncoding: utf8, stderrEncoding: utf8);
+  } on ProcessException catch (e) {
+    return result('error: unable to run gh: ${e.message}', url: fallbackUrl);
+  }
+  if (view.exitCode != 0) {
+    final err = view.stderr.toString().trim().split('\n').first;
+    return result('error: ${err.isEmpty ? 'gh pr view failed' : err}', url: fallbackUrl);
+  }
+
+  final pr = jsonDecode(view.stdout.toString()) as Map<String, dynamic>;
+  return result(_describePrStatus(pr),
+      url: pr['url'] as String? ?? fallbackUrl,
+      author: (pr['author'] as Map<String, dynamic>?)?['login'] as String? ?? '',
+      finished: pr['state'] == 'MERGED' || pr['state'] == 'CLOSED');
+}
+
+Future<void> _prReviewCheckCommand(List<String> args) async {
+  var prune = false;
+  var interactive = false;
+  for (final arg in args) {
+    if (arg == '-h' || arg == '--help') {
+      _printPrReviewCheckUsage();
+      return;
+    }
+    if (arg == '--prune') {
+      prune = true;
+      continue;
+    }
+    if (arg == '-i') {
+      interactive = true;
+      continue;
+    }
+    print("\x1b[31mError: Unknown ${arg.startsWith('-') ? 'option' : 'argument'} '$arg'\x1b[0m");
+    _printPrReviewCheckUsage();
+    exit(1);
+  }
+  if (prune && interactive) {
+    _fail("--prune and -i cannot be used together");
+  }
+
+  final home = getHomePath();
+  final root = Directory(_joinPath([home, 'review-repos']));
+  if (!root.existsSync()) {
+    _fail("'${root.path}' does not exist");
+  }
+
+  final folders = _findPrFolders(root)..sort((a, b) => a.path.compareTo(b.path));
+  if (folders.isEmpty) {
+    print("No PR-<number> folders found under '${root.path}'");
+    return;
+  }
+
+  String display(String path) => path.startsWith('$home/') ? '~${path.substring(home.length)}' : path;
+
+  // Ask GitHub about a few pull requests at a time.
+  print("Checking ${folders.length} pull request${folders.length == 1 ? '' : 's'}...");
+  const batchSize = 8;
+  final results = <_ReviewedPr>[];
+  for (var i = 0; i < folders.length; i += batchSize) {
+    final batch = folders.skip(i).take(batchSize);
+    results.addAll(await Future.wait(batch.map((d) => _checkPrFolder(d, display(d.path)))));
+  }
+
+  final table = TableBuilder()
+    ..addColumn('url', displayName: 'URL')
+    ..addColumn('author', displayName: 'Author')
+    ..addColumn('status', displayName: 'Status')
+    ..addColumn('folder', displayName: 'Folder');
+  for (final pr in results) {
+    table.addRow({'url': pr.url, 'author': pr.author, 'status': pr.status, 'folder': pr.folder});
+  }
+  if (interactive) {
+    await _pickPrToResume(results, table.build());
+    return;
+  }
+  print("\n${table.build()}");
+
+  if (prune) {
+    _prunePrFolders(results.where((pr) => pr.finished).toList(), root);
+  }
+}
+
+/// Reads single keys from the controlling terminal. While open, the terminal
+/// is unbuffered and silent, with a short read timeout so that a lone ESC can
+/// be told apart from the start of an arrow key's escape sequence.
+class _TerminalKeys {
+  final RandomAccessFile _tty;
+  final String _savedMode;
+
+  _TerminalKeys._(this._tty, this._savedMode);
+
+  /// Returns null when there is no terminal to read from.
+  static _TerminalKeys? open() {
+    final saved = _stty(['-g']);
+    if (saved == null) return null;
+    // -isig: Ctrl-C arrives as a key, so the terminal is always restored.
+    if (_stty(['-icanon', '-echo', '-isig', 'min', '0', 'time', '1']) == null) return null;
+    try {
+      return _TerminalKeys._(File('/dev/tty').openSync(), saved);
+    } on FileSystemException {
+      _stty([saved]);
+      return null;
+    }
+  }
+
+  static String? _stty(List<String> args) {
+    final result = Process.runSync('sh', ['-c', 'stty "\$@" < /dev/tty', 'stty', ...args], stdoutEncoding: utf8);
+    return result.exitCode == 0 ? result.stdout.toString().trim() : null;
+  }
+
+  int _read() => _tty.readByteSync();
+
+  /// Waits for a key: 'up', 'down', 'enter', 'open', 'escape', 'quit', or
+  /// null for anything else.
+  String? next() {
+    var byte = _read();
+    while (byte < 0) {
+      byte = _read();
+    }
+    switch (byte) {
+      case 13:
+      case 10:
+        return 'enter';
+      case 3:
+      case 113: // q
+        return 'quit';
+      case 107: // k
+        return 'up';
+      case 106: // j
+        return 'down';
+      case 111: // o
+      case 79: // O
+        return 'open';
+      case 27:
+        final second = _read();
+        if (second < 0) return 'escape';
+        if (second != 91 && second != 79) return null; // '[' or 'O'
+        final third = _read();
+        if (third == 65) return 'up';
+        if (third == 66) return 'down';
+        // Swallow the rest of a longer sequence, such as a function key.
+        while (_read() >= 0) {}
+        return null;
+    }
+    return null;
+  }
+
+  void close() {
+    _tty.closeSync();
+    _stty([_savedMode]);
+  }
+}
+
+/// Shows [tableText] with one highlighted row that the arrow keys move. Enter
+/// runs that pull request's resume.sh, o opens it in the browser, and ESC (or
+/// q) exits.
+Future<void> _pickPrToResume(List<_ReviewedPr> prs, String tableText) async {
+  final lines = tableText.split('\n').where((l) => l.isNotEmpty).toList();
+  final header = lines.take(2).toList();
+  final rows = lines.skip(2).toList();
+
+  final keys = _TerminalKeys.open();
+  if (keys == null) {
+    _fail("-i needs a terminal");
+  }
+
+  final screenLines = stdout.hasTerminal ? stdout.terminalLines : 24;
+  final visible = max(1, min(rows.length, screenLines - header.length - 3));
+  var selected = 0;
+  var top = 0;
+  var message = '';
+  var drawn = 0;
+
+  void draw() {
+    if (selected < top) top = selected;
+    if (selected >= top + visible) top = selected - visible + 1;
+    final out = StringBuffer();
+    if (drawn > 0) out.write('\x1b[${drawn}A');
+    for (final line in header) {
+      out.write('\r\x1b[2K$line\n');
+    }
+    for (var i = top; i < top + visible; i++) {
+      out.write(i == selected ? '\r\x1b[2K\x1b[7m${rows[i]}\x1b[0m\n' : '\r\x1b[2K${rows[i]}\n');
+    }
+    final more = rows.length > visible ? '  (${selected + 1}/${rows.length})' : '';
+    out.write('\r\x1b[2K\x1b[2m↑/↓ select, Enter resume, o open in browser, Esc exit$more\x1b[0m\n');
+    out.write('\r\x1b[2K$message\n');
+    drawn = header.length + visible + 2;
+    stdout.write(out);
+  }
+
+  stdout.write('\n\x1b[?25l');
+  _ReviewedPr? chosen;
+  try {
+    for (;;) {
+      draw();
+      switch (keys.next()) {
+        case 'up':
+          selected = (selected - 1 + rows.length) % rows.length;
+          message = '';
+        case 'down':
+          selected = (selected + 1) % rows.length;
+          message = '';
+        case 'escape':
+        case 'quit':
+          return;
+        case 'enter':
+          final pr = prs[selected];
+          if (File(_joinPath([pr.dir.path, 'resume.sh'])).existsSync()) {
+            chosen = pr;
+            return;
+          }
+          message = '\x1b[33mNo resume.sh in ${pr.folder}\x1b[0m';
+        case 'open':
+          message = _openInBrowser(prs[selected].url);
+      }
+    }
+  } finally {
+    keys.close();
+    stdout.write('\x1b[?25h');
+    if (chosen != null) {
+      await _runResumeScript(chosen);
+    }
+  }
+}
+
+/// Opens [url] in the default browser, returning a line describing the result.
+String _openInBrowser(String url) {
+  if (url.isEmpty) {
+    return '\x1b[33mNo URL for this pull request\x1b[0m';
+  }
+  final opener = Platform.isMacOS ? 'open' : 'xdg-open';
+  try {
+    final result = Process.runSync(opener, [url]);
+    if (result.exitCode == 0) {
+      return 'Opened $url';
+    }
+  } on ProcessException {
+    // Reported below.
+  }
+  return '\x1b[31mUnable to open $url with $opener\x1b[0m';
+}
+
+/// Runs [pr]'s resume.sh attached to this terminal, then exits with its exit
+/// code.
+Future<void> _runResumeScript(_ReviewedPr pr) async {
+  final script = _joinPath([pr.dir.path, 'resume.sh']);
+  print("Running ${pr.folder}/resume.sh...");
+  final Process process;
+  try {
+    process = await Process.start(script, [], workingDirectory: pr.dir.path, mode: ProcessStartMode.inheritStdio);
+  } on ProcessException catch (e) {
+    _fail("Unable to run '$script': ${e.message}");
+  }
+  // Ctrl-C belongs to the script (and claude); don't let it kill gitty.
+  ProcessSignal.sigint.watch().listen((_) {});
+  exit(await process.exitCode);
+}
+
+/// Deletes the folders of merged and closed pull requests after confirmation,
+/// keeping any whose clone has uncommitted changes, then removes parent
+/// folders left empty below [root].
+void _prunePrFolders(List<_ReviewedPr> finished, Directory root) {
+  if (finished.isEmpty) {
+    print("Nothing to prune: no merged or closed pull requests");
+    return;
+  }
+
+  final toDelete = <_ReviewedPr>[];
+  for (final pr in finished) {
+    final dirty = pr.dir
+        .listSync(followLinks: false)
+        .whereType<Directory>()
+        .where((d) => Directory(_joinPath([d.path, '.git'])).existsSync())
+        .any((clone) {
+      final status = Process.runSync('git', ['status', '--porcelain'], workingDirectory: clone.path, stdoutEncoding: utf8);
+      return status.exitCode != 0 || status.stdout.toString().trim().isNotEmpty;
+    });
+    if (dirty) {
+      print("\x1b[33mKeeping ${pr.folder}: its clone has uncommitted changes\x1b[0m");
+    } else {
+      toDelete.add(pr);
+    }
+  }
+  if (toDelete.isEmpty) {
+    return;
+  }
+
+  print("\nFolders of merged or closed pull requests:");
+  for (final pr in toDelete) {
+    print("  ${pr.folder}  (${pr.status})");
+  }
+  if (!promptYes(toDelete.length == 1 ? "Delete this folder" : "Delete these ${toDelete.length} folders")) {
+    print("Nothing deleted");
+    return;
+  }
+
+  final rootPath = root.absolute.path;
+  for (final pr in toDelete) {
+    pr.dir.deleteSync(recursive: true);
+    for (var parent = pr.dir.parent;
+        parent.absolute.path.startsWith('$rootPath/') && parent.existsSync() && _isEmptyDir(parent);
+        parent = parent.parent) {
+      parent.deleteSync();
+    }
+  }
+  print("\x1b[32mDeleted ${toDelete.length} folder${toDelete.length == 1 ? '' : 's'}\x1b[0m");
+}
+
+void _printPrReviewCheckUsage() {
+  print("Usage: gitty pr-review-check [--prune | -i]");
+  print("");
+  print("Finds the PR-<number> folders under ~/review-repos (as made by clone-pr) and");
+  print("shows each pull request's URL, author and current status, looked up with gh");
+  print("from the repository cloned inside the folder.");
+  print("");
+  print("Options:");
+  print("  --prune     After the table, offer to delete the folders of merged and");
+  print("              closed pull requests (and any parent folders left empty).");
+  print("              Folders whose clone has uncommitted changes are kept.");
+  print("  -i          Pick a pull request with the arrow keys (or j/k) and press");
+  print("              Enter to run its resume.sh, or o to open it in the browser;");
+  print("              Esc or q exits.");
+}
+
 /// Options for the `squash` command.
 class SquashOptions {
   final String message;
@@ -1362,6 +1776,7 @@ void _printUsage() {
   print("  clone-pr <pr-url> [--dir <dir>]     Clone a PR into ~/review-repos/<author>/<owner>/PR-<num>/<repo> (requires gh)");
   print("           [--claude]                 ...then run claude in it (writes ../resume.sh)");
   print("  clone-branch [-d] [--claude]        Clone the current (pushed) branch into ~/review-repos/local/<owner>/<branch>/<repo>");
+  print("  pr-review-check [--prune | -i]      Show the status of each PR cloned under ~/review-repos (requires gh)");
   print("  squash <message> [--base <branch>]  Squash the current branch's commits into one");
   print("  projects <action>                   Manage projects");
   print("");
@@ -1417,6 +1832,9 @@ void process(List<String> args) {
       break;
     case 'clone-branch':
       _cloneBranchCommand(commandArgs);
+      break;
+    case 'pr-review-check':
+      _prReviewCheckCommand(commandArgs);
       break;
     case 'squash':
       _squashCommand(commandArgs);

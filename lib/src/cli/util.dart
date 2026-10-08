@@ -460,7 +460,11 @@ bool promptYes(String prompt, {int? exitCode}) {
   for (;;) {
     stdout.write(prompt);
     var input = stdin.readLineSync();
-    if (input == null || input.isEmpty) {
+    if (input == null) {
+      // End of input: nothing will ever answer, so treat it as a no.
+      stdout.writeln();
+      input = "";
+    } else if (input.isEmpty) {
       continue;
     }
     if (input.toLowerCase() == "yes") {
