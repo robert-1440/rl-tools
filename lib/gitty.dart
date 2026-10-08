@@ -1166,13 +1166,18 @@ class _ReviewedPr {
   final String folder;
   final int number;
   final String url;
+  final String branch;
   final String author;
   final String status;
 
   /// True once the pull request is merged or closed.
   final bool finished;
 
-  _ReviewedPr(this.dir, this.folder, this.number, this.url, this.author, this.status, {this.finished = false});
+  /// True while the pull request is waiting on the current user's review.
+  final bool reviewRequested;
+
+  _ReviewedPr(this.dir, this.folder, this.number, this.url, this.branch, this.author, this.status,
+      {this.finished = false, this.reviewRequested = false});
 }
 
 final RegExp _prFolderPattern = RegExp(r'^PR-(\d+)$');
@@ -1220,10 +1225,43 @@ String _describePrStatus(Map<String, dynamic> pr) {
   return state;
 }
 
-Future<_ReviewedPr> _checkPrFolder(Directory prDir, String displayFolder) async {
+/// True if [pr] (`gh pr view --json state,reviewRequests` output) is open and
+/// has a pending review request for [login]. Requests made of a team are not
+/// counted, as telling whether [login] is on the team takes more API access.
+bool isReviewRequestedFrom(Map<String, dynamic> pr, String login) {
+  if (pr['state'] != 'OPEN') return false;
+  final requests = pr['reviewRequests'];
+  if (requests is! List) return false;
+  final me = login.toLowerCase();
+  return requests.any((r) => r is Map && (r['login'] as String?)?.toLowerCase() == me);
+}
+
+/// The login of the user gh is authenticated as on [host], or null if gh
+/// cannot tell.
+Future<String?> _ghLogin(String host) async {
+  try {
+    final result = await Process.run(
+        'gh', ['api', 'user', '-q', '.login', if (host != 'github.com') ...['--hostname', host]],
+        stdoutEncoding: utf8, stderrEncoding: utf8);
+    final login = result.stdout.toString().trim();
+    return result.exitCode == 0 && login.isNotEmpty ? login : null;
+  } on ProcessException {
+    return null;
+  }
+}
+
+/// [loginFor] gives the current user's login on a host, for the Review column.
+Future<_ReviewedPr> _checkPrFolder(
+    Directory prDir, String displayFolder, Future<String?> Function(String host) loginFor) async {
   final number = int.parse(_prFolderPattern.firstMatch(getName(prDir))!.group(1)!);
-  _ReviewedPr result(String status, {String url = '', String author = '', bool finished = false}) =>
-      _ReviewedPr(prDir, displayFolder, number, url, author, status, finished: finished);
+  _ReviewedPr result(String status,
+          {String url = '',
+          String branch = '',
+          String author = '',
+          bool finished = false,
+          bool reviewRequested = false}) =>
+      _ReviewedPr(prDir, displayFolder, number, url, branch, author, status,
+          finished: finished, reviewRequested: reviewRequested);
 
   final clones = prDir
       .listSync(followLinks: false)
@@ -1247,7 +1285,7 @@ Future<_ReviewedPr> _checkPrFolder(Directory prDir, String displayFolder) async 
   final ProcessResult view;
   try {
     view = await Process.run(
-        'gh', ['pr', 'view', '$number', '-R', ghRepo, '--json', 'url,author,state,isDraft,reviewDecision'],
+        'gh', ['pr', 'view', '$number', '-R', ghRepo, '--json', 'url,headRefName,author,state,isDraft,reviewDecision,reviewRequests'],
         stdoutEncoding: utf8, stderrEncoding: utf8);
   } on ProcessException catch (e) {
     return result('error: unable to run gh: ${e.message}', url: fallbackUrl);
@@ -1258,10 +1296,13 @@ Future<_ReviewedPr> _checkPrFolder(Directory prDir, String displayFolder) async 
   }
 
   final pr = jsonDecode(view.stdout.toString()) as Map<String, dynamic>;
+  final login = await loginFor(repo.host);
   return result(_describePrStatus(pr),
       url: pr['url'] as String? ?? fallbackUrl,
+      branch: pr['headRefName'] as String? ?? '',
       author: (pr['author'] as Map<String, dynamic>?)?['login'] as String? ?? '',
-      finished: pr['state'] == 'MERGED' || pr['state'] == 'CLOSED');
+      finished: pr['state'] == 'MERGED' || pr['state'] == 'CLOSED',
+      reviewRequested: login != null && isReviewRequestedFrom(pr, login));
 }
 
 Future<void> _prReviewCheckCommand(List<String> args) async {
@@ -1305,19 +1346,31 @@ Future<void> _prReviewCheckCommand(List<String> args) async {
   // Ask GitHub about a few pull requests at a time.
   print("Checking ${folders.length} pull request${folders.length == 1 ? '' : 's'}...");
   const batchSize = 8;
+  // One login lookup per host, shared by every pull request on it.
+  final logins = <String, Future<String?>>{};
+  Future<String?> loginFor(String host) => logins.putIfAbsent(host, () => _ghLogin(host));
   final results = <_ReviewedPr>[];
   for (var i = 0; i < folders.length; i += batchSize) {
     final batch = folders.skip(i).take(batchSize);
-    results.addAll(await Future.wait(batch.map((d) => _checkPrFolder(d, display(d.path)))));
+    results.addAll(await Future.wait(batch.map((d) => _checkPrFolder(d, display(d.path), loginFor))));
   }
 
   final table = TableBuilder()
     ..addColumn('url', displayName: 'URL')
+    ..addColumn('branch', displayName: 'Branch')
     ..addColumn('author', displayName: 'Author')
     ..addColumn('status', displayName: 'Status')
+    ..addColumn('review', displayName: 'Review')
     ..addColumn('folder', displayName: 'Folder');
   for (final pr in results) {
-    table.addRow({'url': pr.url, 'author': pr.author, 'status': pr.status, 'folder': pr.folder});
+    table.addRow({
+      'url': pr.url,
+      'branch': pr.branch,
+      'author': pr.author,
+      'status': pr.status,
+      'review': pr.reviewRequested ? 'requested' : '',
+      'folder': pr.folder,
+    });
   }
   if (interactive) {
     await _pickPrToResume(results, table.build());
@@ -1360,8 +1413,8 @@ class _TerminalKeys {
 
   int _read() => _tty.readByteSync();
 
-  /// Waits for a key: 'up', 'down', 'enter', 'open', 'escape', 'quit', or
-  /// null for anything else.
+  /// Waits for a key: 'up', 'down', 'enter', 'open', 'copy-branch', 'escape',
+  /// 'quit', or null for anything else.
   String? next() {
     var byte = _read();
     while (byte < 0) {
@@ -1381,6 +1434,9 @@ class _TerminalKeys {
       case 111: // o
       case 79: // O
         return 'open';
+      case 98: // b
+      case 66: // B
+        return 'copy-branch';
       case 27:
         final second = _read();
         if (second < 0) return 'escape';
@@ -1402,8 +1458,8 @@ class _TerminalKeys {
 }
 
 /// Shows [tableText] with one highlighted row that the arrow keys move. Enter
-/// runs that pull request's resume.sh, o opens it in the browser, and ESC (or
-/// q) exits.
+/// runs that pull request's resume.sh, o opens it in the browser, b copies its
+/// branch name, and ESC (or q) exits.
 Future<void> _pickPrToResume(List<_ReviewedPr> prs, String tableText) async {
   final lines = tableText.split('\n').where((l) => l.isNotEmpty).toList();
   final header = lines.take(2).toList();
@@ -1433,7 +1489,7 @@ Future<void> _pickPrToResume(List<_ReviewedPr> prs, String tableText) async {
       out.write(i == selected ? '\r\x1b[2K\x1b[7m${rows[i]}\x1b[0m\n' : '\r\x1b[2K${rows[i]}\n');
     }
     final more = rows.length > visible ? '  (${selected + 1}/${rows.length})' : '';
-    out.write('\r\x1b[2K\x1b[2m↑/↓ select, Enter resume, o open in browser, Esc exit$more\x1b[0m\n');
+    out.write('\r\x1b[2K\x1b[2m↑/↓ select, Enter resume, o open in browser, b copy branch, Esc exit$more\x1b[0m\n');
     out.write('\r\x1b[2K$message\n');
     drawn = header.length + visible + 2;
     stdout.write(out);
@@ -1463,6 +1519,8 @@ Future<void> _pickPrToResume(List<_ReviewedPr> prs, String tableText) async {
           message = '\x1b[33mNo resume.sh in ${pr.folder}\x1b[0m';
         case 'open':
           message = _openInBrowser(prs[selected].url);
+        case 'copy-branch':
+          message = await _copyToClipboard(prs[selected].branch, 'branch name');
       }
     }
   } finally {
@@ -1489,6 +1547,36 @@ String _openInBrowser(String url) {
     // Reported below.
   }
   return '\x1b[31mUnable to open $url with $opener\x1b[0m';
+}
+
+/// Copies [text] to the clipboard, returning a line describing the result.
+/// [what] names the text in that line.
+Future<String> _copyToClipboard(String text, String what) async {
+  if (text.isEmpty) {
+    return '\x1b[33mNo $what for this pull request\x1b[0m';
+  }
+  final candidates = Platform.isMacOS
+      ? [
+          ['pbcopy'],
+        ]
+      : [
+          ['wl-copy'],
+          ['xclip', '-selection', 'clipboard'],
+          ['xsel', '--clipboard', '--input'],
+        ];
+  for (final command in candidates) {
+    try {
+      final process = await Process.start(command.first, command.sublist(1));
+      process.stdin.write(text);
+      await process.stdin.close();
+      if (await process.exitCode == 0) {
+        return 'Copied $what: $text';
+      }
+    } on ProcessException {
+      // Not installed; try the next one.
+    }
+  }
+  return '\x1b[31mUnable to copy to the clipboard (tried ${candidates.map((c) => c.first).join(', ')})\x1b[0m';
 }
 
 /// Runs [pr]'s resume.sh attached to this terminal, then exits with its exit
@@ -1561,16 +1649,18 @@ void _printPrReviewCheckUsage() {
   print("Usage: gitty pr-review-check [--prune | -i]");
   print("");
   print("Finds the PR-<number> folders under ~/review-repos (as made by clone-pr) and");
-  print("shows each pull request's URL, author and current status, looked up with gh");
-  print("from the repository cloned inside the folder.");
+  print("shows each pull request's URL, branch, author and current status, looked up with gh");
+  print("from the repository cloned inside the folder. The Review column says");
+  print("'requested' when the pull request is waiting on your review, such as after");
+  print("the author re-requests it.");
   print("");
   print("Options:");
   print("  --prune     After the table, offer to delete the folders of merged and");
   print("              closed pull requests (and any parent folders left empty).");
   print("              Folders whose clone has uncommitted changes are kept.");
   print("  -i          Pick a pull request with the arrow keys (or j/k) and press");
-  print("              Enter to run its resume.sh, or o to open it in the browser;");
-  print("              Esc or q exits.");
+  print("              Enter to run its resume.sh, o to open it in the browser, or");
+  print("              b to copy its branch name; Esc or q exits.");
 }
 
 /// Options for the `squash` command.

@@ -2,6 +2,37 @@ import 'package:rl_tools/gitty.dart';
 import 'package:test/test.dart';
 
 void main() {
+  group('isReviewRequestedFrom', () {
+    Map<String, dynamic> pr(List<Map<String, dynamic>>? requests, {String state = 'OPEN'}) =>
+        {'state': state, if (requests != null) 'reviewRequests': requests};
+
+    test('is true when the login is a requested reviewer', () {
+      expect(isReviewRequestedFrom(pr([{'login': 'other'}, {'login': 'me'}]), 'me'), isTrue);
+    });
+
+    test('matches the login case-insensitively', () {
+      expect(isReviewRequestedFrom(pr([{'login': 'Robert-1440'}]), 'robert-1440'), isTrue);
+    });
+
+    test('is false when only others are requested', () {
+      expect(isReviewRequestedFrom(pr([{'login': 'other'}]), 'me'), isFalse);
+    });
+
+    test('ignores team requests', () {
+      expect(isReviewRequestedFrom(pr([{'name': 'me', 'slug': 'me'}]), 'me'), isFalse);
+    });
+
+    test('is false once the pull request is merged or closed', () {
+      expect(isReviewRequestedFrom(pr([{'login': 'me'}], state: 'MERGED'), 'me'), isFalse);
+      expect(isReviewRequestedFrom(pr([{'login': 'me'}], state: 'CLOSED'), 'me'), isFalse);
+    });
+
+    test('is false without review requests', () {
+      expect(isReviewRequestedFrom(pr(null), 'me'), isFalse);
+      expect(isReviewRequestedFrom(pr([]), 'me'), isFalse);
+    });
+  });
+
   group('parseRemoteUrl', () {
     void expectRepo(String input, String host, String owner, String repo) {
       final parsed = parseRemoteUrl(input);
