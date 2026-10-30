@@ -1308,10 +1308,19 @@ Future<_ReviewedPr> _checkPrFolder(
 Future<void> _prReviewCheckCommand(List<String> args) async {
   var prune = false;
   var interactive = false;
-  for (final arg in args) {
+  String? author;
+  for (var i = 0; i < args.length; i++) {
+    final arg = args[i];
     if (arg == '-h' || arg == '--help') {
       _printPrReviewCheckUsage();
       return;
+    }
+    if (arg == '--author') {
+      if (i + 1 >= args.length || args[i + 1].isEmpty) {
+        _fail("--author needs a name");
+      }
+      author = args[++i];
+      continue;
     }
     if (arg == '--prune') {
       prune = true;
@@ -1354,9 +1363,18 @@ Future<void> _prReviewCheckCommand(List<String> args) async {
     final batch = folders.skip(i).take(batchSize);
     results.addAll(await Future.wait(batch.map((d) => _checkPrFolder(d, display(d.path), loginFor))));
   }
+  if (author != null) {
+    final match = author.toLowerCase();
+    results.retainWhere((pr) => pr.author.toLowerCase().contains(match));
+    if (results.isEmpty) {
+      print("No pull requests with an author matching '$author'");
+      return;
+    }
+  }
 
   final table = TableBuilder()
     ..addColumn('url', displayName: 'URL')
+    ..addColumn('number', displayName: 'PR #')
     ..addColumn('branch', displayName: 'Branch')
     ..addColumn('author', displayName: 'Author')
     ..addColumn('status', displayName: 'Status')
@@ -1365,6 +1383,7 @@ Future<void> _prReviewCheckCommand(List<String> args) async {
   for (final pr in results) {
     table.addRow({
       'url': pr.url,
+      'number': '${pr.number}',
       'branch': pr.branch,
       'author': pr.author,
       'status': pr.status,
@@ -1646,15 +1665,18 @@ void _prunePrFolders(List<_ReviewedPr> finished, Directory root) {
 }
 
 void _printPrReviewCheckUsage() {
-  print("Usage: gitty pr-review-check [--prune | -i]");
+  print("Usage: gitty pr-review-check [--author <name>] [--prune | -i]");
   print("");
   print("Finds the PR-<number> folders under ~/review-repos (as made by clone-pr) and");
-  print("shows each pull request's URL, branch, author and current status, looked up with gh");
+  print("shows each pull request's URL, number, branch, author and current status, looked up with gh");
   print("from the repository cloned inside the folder. The Review column says");
   print("'requested' when the pull request is waiting on your review, such as after");
   print("the author re-requests it.");
   print("");
   print("Options:");
+  print("  --author <name>");
+  print("              Only show pull requests whose author contains <name>,");
+  print("              ignoring case. With --prune, only those are offered.");
   print("  --prune     After the table, offer to delete the folders of merged and");
   print("              closed pull requests (and any parent folders left empty).");
   print("              Folders whose clone has uncommitted changes are kept.");
@@ -1867,6 +1889,7 @@ void _printUsage() {
   print("           [--claude]                 ...then run claude in it (writes ../resume.sh)");
   print("  clone-branch [-d] [--claude]        Clone the current (pushed) branch into ~/review-repos/local/<owner>/<branch>/<repo>");
   print("  pr-review-check [--prune | -i]      Show the status of each PR cloned under ~/review-repos (requires gh)");
+  print("                  [--author <name>]   ...only PRs whose author contains <name> (any case)");
   print("  squash <message> [--base <branch>]  Squash the current branch's commits into one");
   print("  projects <action>                   Manage projects");
   print("");
