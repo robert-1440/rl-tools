@@ -1308,6 +1308,7 @@ Future<_ReviewedPr> _checkPrFolder(
 Future<void> _prReviewCheckCommand(List<String> args) async {
   var prune = false;
   var interactive = false;
+  var requestedOnly = false;
   String? author;
   for (var i = 0; i < args.length; i++) {
     final arg = args[i];
@@ -1328,6 +1329,10 @@ Future<void> _prReviewCheckCommand(List<String> args) async {
     }
     if (arg == '-i') {
       interactive = true;
+      continue;
+    }
+    if (arg == '--requested') {
+      requestedOnly = true;
       continue;
     }
     print("\x1b[31mError: Unknown ${arg.startsWith('-') ? 'option' : 'argument'} '$arg'\x1b[0m");
@@ -1368,6 +1373,13 @@ Future<void> _prReviewCheckCommand(List<String> args) async {
     results.retainWhere((pr) => pr.author.toLowerCase().contains(match));
     if (results.isEmpty) {
       print("No pull requests with an author matching '$author'");
+      return;
+    }
+  }
+  if (requestedOnly) {
+    results.retainWhere((pr) => pr.reviewRequested);
+    if (results.isEmpty) {
+      print("No pull requests ${author != null ? "by '$author' " : ''}waiting on your review");
       return;
     }
   }
@@ -1476,13 +1488,26 @@ class _TerminalKeys {
   }
 }
 
-/// Shows [tableText] with one highlighted row that the arrow keys move. Enter
-/// runs that pull request's resume.sh, o opens it in the browser, b copies its
-/// branch name, and ESC (or q) exits.
-Future<void> _pickPrToResume(List<_ReviewedPr> prs, String tableText) async {
+/// What a key press in [_pickFromTable] leads to: a line to show under the
+/// table, or an action to run once the terminal has been restored.
+class _PickOutcome {
+  final String message;
+  final Future<void> Function()? then;
+
+  const _PickOutcome.message(this.message) : then = null;
+  const _PickOutcome.finish(Future<void> Function() this.then) : message = '';
+}
+
+/// Shows [tableText] with one highlighted row that the arrow keys (or j/k)
+/// move; ESC or q exits. Any other recognized key ('enter', 'open',
+/// 'copy-branch') goes to [onKey] with the selected row's index, and returns
+/// null to ignore it. [hint] is shown under the table.
+Future<void> _pickFromTable(
+    String tableText, String hint, Future<_PickOutcome?> Function(String key, int index) onKey) async {
   final lines = tableText.split('\n').where((l) => l.isNotEmpty).toList();
   final header = lines.take(2).toList();
   final rows = lines.skip(2).toList();
+  if (rows.isEmpty) return;
 
   final keys = _TerminalKeys.open();
   if (keys == null) {
@@ -1508,18 +1533,19 @@ Future<void> _pickPrToResume(List<_ReviewedPr> prs, String tableText) async {
       out.write(i == selected ? '\r\x1b[2K\x1b[7m${rows[i]}\x1b[0m\n' : '\r\x1b[2K${rows[i]}\n');
     }
     final more = rows.length > visible ? '  (${selected + 1}/${rows.length})' : '';
-    out.write('\r\x1b[2K\x1b[2m↑/↓ select, Enter resume, o open in browser, b copy branch, Esc exit$more\x1b[0m\n');
+    out.write('\r\x1b[2K\x1b[2m$hint$more\x1b[0m\n');
     out.write('\r\x1b[2K$message\n');
     drawn = header.length + visible + 2;
     stdout.write(out);
   }
 
   stdout.write('\n\x1b[?25l');
-  _ReviewedPr? chosen;
+  Future<void> Function()? then;
   try {
     for (;;) {
       draw();
-      switch (keys.next()) {
+      final key = keys.next();
+      switch (key) {
         case 'up':
           selected = (selected - 1 + rows.length) % rows.length;
           message = '';
@@ -1529,26 +1555,51 @@ Future<void> _pickPrToResume(List<_ReviewedPr> prs, String tableText) async {
         case 'escape':
         case 'quit':
           return;
-        case 'enter':
-          final pr = prs[selected];
-          if (File(_joinPath([pr.dir.path, 'resume.sh'])).existsSync()) {
-            chosen = pr;
+        case null:
+          break;
+        default:
+          final outcome = await onKey(key, selected);
+          if (outcome == null) break;
+          if (outcome.then != null) {
+            then = outcome.then;
             return;
           }
-          message = '\x1b[33mNo resume.sh in ${pr.folder}\x1b[0m';
-        case 'open':
-          message = _openInBrowser(prs[selected].url);
-        case 'copy-branch':
-          message = await _copyToClipboard(prs[selected].branch, 'branch name');
+          message = outcome.message;
       }
     }
   } finally {
     keys.close();
     stdout.write('\x1b[?25h');
-    if (chosen != null) {
-      await _runResumeScript(chosen);
+    if (then != null) {
+      await then();
     }
   }
+}
+
+/// The pull request picker for `pr-review-check -i`. Enter runs the pull
+/// request's resume.sh, o opens it in the browser, and b copies its branch
+/// name.
+Future<void> _pickPrToResume(List<_ReviewedPr> prs, String tableText) =>
+    _pickFromTable(tableText, '↑/↓ select, Enter resume, o open in browser, b copy branch, Esc exit',
+        (key, index) async {
+      final pr = prs[index];
+      switch (key) {
+        case 'enter':
+          return _resumeOutcome(pr.dir, pr.folder);
+        case 'open':
+          return _PickOutcome.message(_openInBrowser(pr.url));
+        case 'copy-branch':
+          return _PickOutcome.message(await _copyToClipboard(pr.branch, 'branch name'));
+      }
+      return null;
+    });
+
+/// Runs the resume.sh in [dir] once the picker closes, or explains why not.
+_PickOutcome _resumeOutcome(Directory dir, String folder) {
+  if (File(_joinPath([dir.path, 'resume.sh'])).existsSync()) {
+    return _PickOutcome.finish(() => _runResumeScript(dir, folder));
+  }
+  return _PickOutcome.message('\x1b[33mNo resume.sh in $folder\x1b[0m');
 }
 
 /// Opens [url] in the default browser, returning a line describing the result.
@@ -1598,14 +1649,14 @@ Future<String> _copyToClipboard(String text, String what) async {
   return '\x1b[31mUnable to copy to the clipboard (tried ${candidates.map((c) => c.first).join(', ')})\x1b[0m';
 }
 
-/// Runs [pr]'s resume.sh attached to this terminal, then exits with its exit
+/// Runs the resume.sh in [dir] attached to this terminal, then exits with its exit
 /// code.
-Future<void> _runResumeScript(_ReviewedPr pr) async {
-  final script = _joinPath([pr.dir.path, 'resume.sh']);
-  print("Running ${pr.folder}/resume.sh...");
+Future<void> _runResumeScript(Directory dir, String folder) async {
+  final script = _joinPath([dir.path, 'resume.sh']);
+  print("Running $folder/resume.sh...");
   final Process process;
   try {
-    process = await Process.start(script, [], workingDirectory: pr.dir.path, mode: ProcessStartMode.inheritStdio);
+    process = await Process.start(script, [], workingDirectory: dir.path, mode: ProcessStartMode.inheritStdio);
   } on ProcessException catch (e) {
     _fail("Unable to run '$script': ${e.message}");
   }
@@ -1665,7 +1716,7 @@ void _prunePrFolders(List<_ReviewedPr> finished, Directory root) {
 }
 
 void _printPrReviewCheckUsage() {
-  print("Usage: gitty pr-review-check [--author <name>] [--prune | -i]");
+  print("Usage: gitty pr-review-check [--author <name>] [--requested] [--prune | -i]");
   print("");
   print("Finds the PR-<number> folders under ~/review-repos (as made by clone-pr) and");
   print("shows each pull request's URL, number, branch, author and current status, looked up with gh");
@@ -1677,12 +1728,180 @@ void _printPrReviewCheckUsage() {
   print("  --author <name>");
   print("              Only show pull requests whose author contains <name>,");
   print("              ignoring case. With --prune, only those are offered.");
+  print("  --requested Only show pull requests whose Review column is 'requested'.");
+  print("              With --prune, only those are offered.");
   print("  --prune     After the table, offer to delete the folders of merged and");
   print("              closed pull requests (and any parent folders left empty).");
   print("              Folders whose clone has uncommitted changes are kept.");
   print("  -i          Pick a pull request with the arrow keys (or j/k) and press");
   print("              Enter to run its resume.sh, o to open it in the browser, or");
   print("              b to copy its branch name; Esc or q exits.");
+}
+
+/// A pull request waiting on the current user's review, as found by
+/// `gh search prs`.
+class RequestedPr {
+  final String url;
+  final String owner;
+  final String repo;
+  final int number;
+  final String author;
+
+  const RequestedPr(this.url, this.owner, this.repo, this.number, this.author);
+
+  /// Identifies the pull request regardless of case, matching [_prFolderKey].
+  String get key => '${owner.toLowerCase()}/${repo.toLowerCase()}#$number';
+}
+
+/// Parses `gh search prs --json url,repository,number,author` output.
+/// Entries without a usable repository or number are skipped.
+List<RequestedPr> parseRequestedPrs(String json) {
+  final decoded = jsonDecode(json);
+  if (decoded is! List) return [];
+  final prs = <RequestedPr>[];
+  for (final entry in decoded.whereType<Map>()) {
+    final nameWithOwner = (entry['repository'] as Map?)?['nameWithOwner'] as String? ?? '';
+    final slash = nameWithOwner.indexOf('/');
+    final number = entry['number'];
+    if (slash <= 0 || slash == nameWithOwner.length - 1 || number is! int) continue;
+    final owner = nameWithOwner.substring(0, slash);
+    final repo = nameWithOwner.substring(slash + 1);
+    prs.add(RequestedPr(
+      entry['url'] as String? ?? 'https://github.com/$owner/$repo/pull/$number',
+      owner,
+      repo,
+      number,
+      (entry['author'] as Map?)?['login'] as String? ?? '',
+    ));
+  }
+  return prs;
+}
+
+/// The keys ([RequestedPr.key]) of the pull request cloned in [prDir], laid
+/// out by clone-pr as <owner>/PR-<number>/<repo>: one per clone inside it.
+List<String> _prFolderKeys(Directory prDir) {
+  final number = _prFolderPattern.firstMatch(getName(prDir))!.group(1)!;
+  final owner = getName(prDir.parent).toLowerCase();
+  return prDir
+      .listSync(followLinks: false)
+      .whereType<Directory>()
+      .where((d) => Directory(_joinPath([d.path, '.git'])).existsSync())
+      .map((d) => '$owner/${getName(d).toLowerCase()}#$number')
+      .toList();
+}
+
+Future<void> _checkPrsCommand(List<String> args) async {
+  var interactive = false;
+  for (final arg in args) {
+    if (arg == '-h' || arg == '--help') {
+      _printCheckPrsUsage();
+      return;
+    }
+    if (arg == '-i') {
+      interactive = true;
+      continue;
+    }
+    print("\x1b[31mError: Unknown ${arg.startsWith('-') ? 'option' : 'argument'} '$arg'\x1b[0m");
+    _printCheckPrsUsage();
+    exit(1);
+  }
+
+  print("Searching for pull requests waiting on your review...");
+  final search = _runGh([
+    'search',
+    'prs',
+    '--review-requested=@me',
+    '--state=open',
+    '--limit',
+    '200',
+    '--json',
+    'url,repository,number,author',
+  ]);
+  if (search.exitCode != 0) {
+    print("\x1b[31mError: Unable to search pull requests\x1b[0m");
+    final err = search.stderr.toString().trim();
+    if (err.isNotEmpty) {
+      print(err);
+    }
+    exit(1);
+  }
+  final prs = parseRequestedPrs(search.stdout.toString())
+    ..sort((a, b) {
+      final byRepo = a.owner.toLowerCase().compareTo(b.owner.toLowerCase());
+      if (byRepo != 0) return byRepo;
+      final byName = a.repo.toLowerCase().compareTo(b.repo.toLowerCase());
+      return byName != 0 ? byName : a.number.compareTo(b.number);
+    });
+  if (prs.isEmpty) {
+    print("No pull requests are waiting on your review");
+    return;
+  }
+
+  // Match each pull request to a folder made by clone-pr, if there is one.
+  final home = getHomePath();
+  final root = Directory(_joinPath([home, 'review-repos']));
+  final folders = <String, Directory>{};
+  if (root.existsSync()) {
+    for (final dir in _findPrFolders(root)..sort((a, b) => a.path.compareTo(b.path))) {
+      for (final key in _prFolderKeys(dir)) {
+        folders.putIfAbsent(key, () => dir);
+      }
+    }
+  }
+  String display(String path) => path.startsWith('$home/') ? '~${path.substring(home.length)}' : path;
+
+  final table = TableBuilder()
+    ..addColumn('url', displayName: 'URL')
+    ..addColumn('org', displayName: 'Organization')
+    ..addColumn('repo', displayName: 'Repo')
+    ..addColumn('number', displayName: 'PR #')
+    ..addColumn('author', displayName: 'Author')
+    ..addColumn('reviewed', displayName: 'Reviewed');
+  for (final pr in prs) {
+    table.addRow({
+      'url': pr.url,
+      'org': pr.owner,
+      'repo': pr.repo,
+      'number': '${pr.number}',
+      'author': pr.author,
+      'reviewed': folders.containsKey(pr.key) ? 'yes' : '',
+    });
+  }
+  if (!interactive) {
+    print("\n${table.build()}");
+    return;
+  }
+
+  await _pickFromTable(table.build(), '↑/↓ select, Enter clone or resume, o open in browser, Esc exit',
+      (key, index) async {
+    final pr = prs[index];
+    switch (key) {
+      case 'open':
+        return _PickOutcome.message(_openInBrowser(pr.url));
+      case 'enter':
+        final dir = folders[pr.key];
+        if (dir != null) {
+          return _resumeOutcome(dir, display(dir.path));
+        }
+        return _PickOutcome.finish(() => _clonePrCommand(['--claude', pr.url]));
+    }
+    return null;
+  });
+}
+
+void _printCheckPrsUsage() {
+  print("Usage: gitty check-prs [-i]");
+  print("");
+  print("Lists the open pull requests, across every organization and repository gh");
+  print("can see, that are waiting on your review (directly or through a team).");
+  print("The Reviewed column says 'yes' when clone-pr has already made a folder for");
+  print("the pull request under ~/review-repos.");
+  print("");
+  print("Options:");
+  print("  -i          Pick a pull request with the arrow keys (or j/k). Enter runs");
+  print("              the folder's resume.sh when it has been reviewed before, and");
+  print("              otherwise runs 'clone-pr --claude' on it; o opens it in the");
+  print("              browser; Esc or q exits.");
 }
 
 /// Options for the `squash` command.
@@ -1890,6 +2109,7 @@ void _printUsage() {
   print("  clone-branch [-d] [--claude]        Clone the current (pushed) branch into ~/review-repos/local/<owner>/<branch>/<repo>");
   print("  pr-review-check [--prune | -i]      Show the status of each PR cloned under ~/review-repos (requires gh)");
   print("                  [--author <name>]   ...only PRs whose author contains <name> (any case)");
+  print("  check-prs [-i]                      List open PRs waiting on your review, across all orgs (requires gh)");
   print("  squash <message> [--base <branch>]  Squash the current branch's commits into one");
   print("  projects <action>                   Manage projects");
   print("");
@@ -1948,6 +2168,9 @@ void process(List<String> args) {
       break;
     case 'pr-review-check':
       _prReviewCheckCommand(commandArgs);
+      break;
+    case 'check-prs':
+      _checkPrsCommand(commandArgs);
       break;
     case 'squash':
       _squashCommand(commandArgs);

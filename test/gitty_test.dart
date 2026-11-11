@@ -2,6 +2,38 @@ import 'package:rl_tools/gitty.dart';
 import 'package:test/test.dart';
 
 void main() {
+  group('parseRequestedPrs', () {
+    test('reads the url, repository, number and author', () {
+      final prs = parseRequestedPrs('[{"author":{"login":"jeff-1440"},"number":259,'
+          '"repository":{"name":"Repo","nameWithOwner":"Org-1/Repo"},'
+          '"url":"https://github.com/Org-1/Repo/pull/259"}]');
+      expect(prs, hasLength(1));
+      expect(prs.single.url, 'https://github.com/Org-1/Repo/pull/259');
+      expect(prs.single.owner, 'Org-1');
+      expect(prs.single.repo, 'Repo');
+      expect(prs.single.number, 259);
+      expect(prs.single.author, 'jeff-1440');
+      expect(prs.single.key, 'org-1/repo#259');
+    });
+
+    test('fills in a missing url and author', () {
+      final pr = parseRequestedPrs('[{"number":7,"repository":{"nameWithOwner":"o/r"}}]').single;
+      expect(pr.url, 'https://github.com/o/r/pull/7');
+      expect(pr.author, '');
+    });
+
+    test('skips entries without a repository or number', () {
+      expect(
+          parseRequestedPrs('[{"number":7},{"repository":{"nameWithOwner":"o/r"}},'
+              '{"number":8,"repository":{"nameWithOwner":"bad"}}]'),
+          isEmpty);
+    });
+
+    test('returns nothing for a non-list', () {
+      expect(parseRequestedPrs('{}'), isEmpty);
+    });
+  });
+
   group('isReviewRequestedFrom', () {
     Map<String, dynamic> pr(List<Map<String, dynamic>>? requests, {String state = 'OPEN'}) =>
         {'state': state, if (requests != null) 'reviewRequests': requests};
