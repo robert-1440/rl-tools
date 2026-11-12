@@ -1404,7 +1404,7 @@ Future<void> _prReviewCheckCommand(List<String> args) async {
     });
   }
   if (interactive) {
-    await _pickPrToResume(results, table.build());
+    await _pickPrToResume(results, table.build(), root);
     return;
   }
   print("\n${table.build()}");
@@ -1444,8 +1444,9 @@ class _TerminalKeys {
 
   int _read() => _tty.readByteSync();
 
-  /// Waits for a key: 'up', 'down', 'enter', 'open', 'copy-branch', 'escape',
-  /// 'quit', or null for anything else.
+  /// Waits for a key: 'up', 'down', 'enter', 'open', 'copy-branch', 'delete',
+  /// 'yes', 'no', 'escape', 'quit', or null for anything else. Both the
+  /// backspace-style Delete key and forward delete give 'delete'.
   String? next() {
     var byte = _read();
     while (byte < 0) {
@@ -1468,6 +1469,15 @@ class _TerminalKeys {
       case 98: // b
       case 66: // B
         return 'copy-branch';
+      case 127: // Delete (backspace)
+      case 8:
+        return 'delete';
+      case 121: // y
+      case 89: // Y
+        return 'yes';
+      case 110: // n
+      case 78: // N
+        return 'no';
       case 27:
         final second = _read();
         if (second < 0) return 'escape';
@@ -1475,6 +1485,7 @@ class _TerminalKeys {
         final third = _read();
         if (third == 65) return 'up';
         if (third == 66) return 'down';
+        if (third == 51 && _read() == 126) return 'delete'; // ESC [ 3 ~
         // Swallow the rest of a longer sequence, such as a function key.
         while (_read() >= 0) {}
         return null;
@@ -1494,14 +1505,53 @@ class _PickOutcome {
   final String message;
   final Future<void> Function()? then;
 
-  const _PickOutcome.message(this.message) : then = null;
-  const _PickOutcome.finish(Future<void> Function() this.then) : message = '';
+  /// Lines for a confirmation box; when set, [onConfirm] runs on y.
+  final List<String>? confirm;
+  final Future<_PickOutcome> Function()? onConfirm;
+
+  /// Drops the selected row from the table.
+  final bool removeRow;
+
+  const _PickOutcome.message(this.message, {this.removeRow = false})
+      : then = null,
+        confirm = null,
+        onConfirm = null;
+  const _PickOutcome.finish(Future<void> Function() this.then)
+      : message = '',
+        confirm = null,
+        onConfirm = null,
+        removeRow = false;
+
+  /// Asks a yes/no question in a box over the picker; any key but y cancels.
+  const _PickOutcome.confirm(List<String> this.confirm, Future<_PickOutcome> Function() this.onConfirm)
+      : message = '',
+        then = null,
+        removeRow = false;
+}
+
+/// The width [text] takes on screen, ignoring ANSI color codes.
+int _visibleLength(String text) => text.replaceAll(RegExp(r'\x1b\[[0-9;]*m'), '').runes.length;
+
+/// Draws [lines] in a yellow box, followed by a y/n prompt.
+List<String> _confirmBox(List<String> lines) {
+  const prompt = '[y] Yes    [n] No';
+  final width = [prompt, ...lines].map(_visibleLength).reduce(max);
+  String border(String text) => '\x1b[33m$text\x1b[0m';
+  String row(String text) => '${border('│')} $text${' ' * (width - _visibleLength(text))} ${border('│')}';
+  final indent = ' ' * ((width - prompt.length) ~/ 2);
+  return [
+    border('┌─${'─' * width}─┐'),
+    for (final line in lines) row(line),
+    row(''),
+    row('$indent\x1b[1m$prompt\x1b[0m'),
+    border('└─${'─' * width}─┘'),
+  ];
 }
 
 /// Shows [tableText] with one highlighted row that the arrow keys (or j/k)
 /// move; ESC or q exits. Any other recognized key ('enter', 'open',
-/// 'copy-branch') goes to [onKey] with the selected row's index, and returns
-/// null to ignore it. [hint] is shown under the table.
+/// 'copy-branch', 'delete') goes to [onKey] with the selected row's index,
+/// and returns null to ignore it. [hint] is shown under the table.
 Future<void> _pickFromTable(
     String tableText, String hint, Future<_PickOutcome?> Function(String key, int index) onKey) async {
   final lines = tableText.split('\n').where((l) => l.isNotEmpty).toList();
@@ -1515,36 +1565,65 @@ Future<void> _pickFromTable(
   }
 
   final screenLines = stdout.hasTerminal ? stdout.terminalLines : 24;
-  final visible = max(1, min(rows.length, screenLines - header.length - 3));
   var selected = 0;
   var top = 0;
   var message = '';
   var drawn = 0;
+  _PickOutcome? confirming;
 
   void draw() {
+    final footer = confirming != null
+        ? _confirmBox(confirming.confirm!)
+        : [
+            if (rows.isNotEmpty) '\x1b[2m$hint${rows.length > 1 ? '  (${selected + 1}/${rows.length})' : ''}\x1b[0m',
+            message,
+          ];
+    final visible = min(rows.length, max(1, screenLines - header.length - footer.length - 1));
     if (selected < top) top = selected;
     if (selected >= top + visible) top = selected - visible + 1;
+    if (top + visible > rows.length) top = max(0, rows.length - visible);
     final out = StringBuffer();
+    // Back to the top of the last drawing, clearing it all: the table may
+    // have shrunk.
     if (drawn > 0) out.write('\x1b[${drawn}A');
+    out.write('\r\x1b[J');
     for (final line in header) {
-      out.write('\r\x1b[2K$line\n');
+      out.write('$line\n');
     }
     for (var i = top; i < top + visible; i++) {
-      out.write(i == selected ? '\r\x1b[2K\x1b[7m${rows[i]}\x1b[0m\n' : '\r\x1b[2K${rows[i]}\n');
+      out.write(i == selected ? '\x1b[7m${rows[i]}\x1b[0m\n' : '${rows[i]}\n');
     }
-    final more = rows.length > visible ? '  (${selected + 1}/${rows.length})' : '';
-    out.write('\r\x1b[2K\x1b[2m$hint$more\x1b[0m\n');
-    out.write('\r\x1b[2K$message\n');
-    drawn = header.length + visible + 2;
+    for (final line in footer) {
+      out.write('$line\n');
+    }
+    drawn = header.length + visible + footer.length;
     stdout.write(out);
+  }
+
+  void apply(_PickOutcome outcome) {
+    message = outcome.message;
+    if (outcome.removeRow) {
+      rows.removeAt(selected);
+      if (selected >= rows.length) selected = rows.length - 1;
+    }
   }
 
   stdout.write('\n\x1b[?25l');
   Future<void> Function()? then;
   try {
-    for (;;) {
+    while (rows.isNotEmpty) {
       draw();
       final key = keys.next();
+      if (key == null) continue;
+      final pending = confirming;
+      if (pending != null) {
+        confirming = null;
+        message = '';
+        if (key == 'yes') {
+          apply(await pending.onConfirm!());
+        }
+        continue;
+      }
       switch (key) {
         case 'up':
           selected = (selected - 1 + rows.length) % rows.length;
@@ -1555,8 +1634,6 @@ Future<void> _pickFromTable(
         case 'escape':
         case 'quit':
           return;
-        case null:
-          break;
         default:
           final outcome = await onKey(key, selected);
           if (outcome == null) break;
@@ -1564,9 +1641,15 @@ Future<void> _pickFromTable(
             then = outcome.then;
             return;
           }
-          message = outcome.message;
+          if (outcome.confirm != null) {
+            confirming = outcome;
+            break;
+          }
+          apply(outcome);
       }
     }
+    // Every row is gone; show the final message under the header.
+    draw();
   } finally {
     keys.close();
     stdout.write('\x1b[?25h');
@@ -1577,22 +1660,41 @@ Future<void> _pickFromTable(
 }
 
 /// The pull request picker for `pr-review-check -i`. Enter runs the pull
-/// request's resume.sh, o opens it in the browser, and b copies its branch
-/// name.
-Future<void> _pickPrToResume(List<_ReviewedPr> prs, String tableText) =>
-    _pickFromTable(tableText, '↑/↓ select, Enter resume, o open in browser, b copy branch, Esc exit',
-        (key, index) async {
-      final pr = prs[index];
-      switch (key) {
-        case 'enter':
-          return _resumeOutcome(pr.dir, pr.folder);
-        case 'open':
-          return _PickOutcome.message(_openInBrowser(pr.url));
-        case 'copy-branch':
-          return _PickOutcome.message(await _copyToClipboard(pr.branch, 'branch name'));
-      }
-      return null;
-    });
+/// request's resume.sh, o opens it in the browser, b copies its branch name,
+/// and Delete deletes its folder (under [root]) after confirmation.
+Future<void> _pickPrToResume(List<_ReviewedPr> prs, String tableText, Directory root) {
+  final remaining = [...prs];
+  return _pickFromTable(
+      tableText, '↑/↓ select, Enter resume, o open in browser, b copy branch, Delete delete folder, Esc exit',
+      (key, index) async {
+    final pr = remaining[index];
+    switch (key) {
+      case 'enter':
+        return _resumeOutcome(pr.dir, pr.folder);
+      case 'open':
+        return _PickOutcome.message(_openInBrowser(pr.url));
+      case 'copy-branch':
+        return _PickOutcome.message(await _copyToClipboard(pr.branch, 'branch name'));
+      case 'delete':
+        if (!pr.dir.existsSync()) {
+          return _PickOutcome.message('\x1b[33m${pr.folder} no longer exists\x1b[0m');
+        }
+        return _PickOutcome.confirm([
+          'Delete ${pr.folder}?',
+          if (_hasUncommittedChanges(pr.dir)) '\x1b[31mWarning: its clone has uncommitted changes\x1b[0m',
+        ], () async {
+          try {
+            _deletePrFolder(pr.dir, root);
+          } on FileSystemException catch (e) {
+            return _PickOutcome.message('\x1b[31mUnable to delete ${pr.folder}: ${e.message}\x1b[0m');
+          }
+          remaining.removeAt(index);
+          return _PickOutcome.message('\x1b[32mDeleted ${pr.folder}\x1b[0m', removeRow: true);
+        });
+    }
+    return null;
+  });
+}
 
 /// Runs the resume.sh in [dir] once the picker closes, or explains why not.
 _PickOutcome _resumeOutcome(Directory dir, String folder) {
@@ -1676,15 +1778,7 @@ void _prunePrFolders(List<_ReviewedPr> finished, Directory root) {
 
   final toDelete = <_ReviewedPr>[];
   for (final pr in finished) {
-    final dirty = pr.dir
-        .listSync(followLinks: false)
-        .whereType<Directory>()
-        .where((d) => Directory(_joinPath([d.path, '.git'])).existsSync())
-        .any((clone) {
-      final status = Process.runSync('git', ['status', '--porcelain'], workingDirectory: clone.path, stdoutEncoding: utf8);
-      return status.exitCode != 0 || status.stdout.toString().trim().isNotEmpty;
-    });
-    if (dirty) {
+    if (_hasUncommittedChanges(pr.dir)) {
       print("\x1b[33mKeeping ${pr.folder}: its clone has uncommitted changes\x1b[0m");
     } else {
       toDelete.add(pr);
@@ -1703,16 +1797,31 @@ void _prunePrFolders(List<_ReviewedPr> finished, Directory root) {
     return;
   }
 
-  final rootPath = root.absolute.path;
   for (final pr in toDelete) {
-    pr.dir.deleteSync(recursive: true);
-    for (var parent = pr.dir.parent;
-        parent.absolute.path.startsWith('$rootPath/') && parent.existsSync() && _isEmptyDir(parent);
-        parent = parent.parent) {
-      parent.deleteSync();
-    }
+    _deletePrFolder(pr.dir, root);
   }
   print("\x1b[32mDeleted ${toDelete.length} folder${toDelete.length == 1 ? '' : 's'}\x1b[0m");
+}
+
+/// True if any clone in [prDir] has uncommitted changes, or git cannot tell.
+bool _hasUncommittedChanges(Directory prDir) => prDir
+        .listSync(followLinks: false)
+        .whereType<Directory>()
+        .where((d) => Directory(_joinPath([d.path, '.git'])).existsSync())
+        .any((clone) {
+      final status = Process.runSync('git', ['status', '--porcelain'], workingDirectory: clone.path, stdoutEncoding: utf8);
+      return status.exitCode != 0 || status.stdout.toString().trim().isNotEmpty;
+    });
+
+/// Deletes [prDir], then any parent folders below [root] that it leaves empty.
+void _deletePrFolder(Directory prDir, Directory root) {
+  final rootPath = root.absolute.path;
+  prDir.deleteSync(recursive: true);
+  for (var parent = prDir.parent;
+      parent.absolute.path.startsWith('$rootPath/') && parent.existsSync() && _isEmptyDir(parent);
+      parent = parent.parent) {
+    parent.deleteSync();
+  }
 }
 
 void _printPrReviewCheckUsage() {
@@ -1735,7 +1844,9 @@ void _printPrReviewCheckUsage() {
   print("              Folders whose clone has uncommitted changes are kept.");
   print("  -i          Pick a pull request with the arrow keys (or j/k) and press");
   print("              Enter to run its resume.sh, o to open it in the browser, or");
-  print("              b to copy its branch name; Esc or q exits.");
+  print("              b to copy its branch name, or Delete to delete its folder");
+  print("              (and any parent folders left empty) after confirming;");
+  print("              Esc or q exits.");
 }
 
 /// A pull request waiting on the current user's review, as found by
@@ -1747,34 +1858,68 @@ class RequestedPr {
   final int number;
   final String author;
 
-  const RequestedPr(this.url, this.owner, this.repo, this.number, this.author);
+  /// As in pr-review-check's Status column; see [_describePrStatus].
+  final String status;
 
-  /// Identifies the pull request regardless of case, matching [_prFolderKey].
+  const RequestedPr(this.url, this.owner, this.repo, this.number, this.author, this.status);
+
+  /// Identifies the pull request regardless of case, matching [_prFolderKeys].
   String get key => '${owner.toLowerCase()}/${repo.toLowerCase()}#$number';
 }
 
-/// Parses `gh search prs --json url,repository,number,author` output.
-/// Entries without a usable repository or number are skipped.
-List<RequestedPr> parseRequestedPrs(String json) {
+/// One page of [_requestedPrsQuery] results.
+class RequestedPrPage {
+  final List<RequestedPr> prs;
+
+  /// The cursor for the next page, or null on the last one.
+  final String? nextCursor;
+
+  const RequestedPrPage(this.prs, this.nextCursor);
+}
+
+/// A GraphQL search for open pull requests waiting on the current user's
+/// review. Unlike `gh search prs --json`, it can return reviewDecision.
+const _requestedPrsQuery = r'''
+query($after: String) {
+  search(query: "is:pr is:open archived:false review-requested:@me", type: ISSUE, first: 100, after: $after) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      ... on PullRequest {
+        url number state isDraft reviewDecision
+        author { login }
+        repository { name owner { login } }
+      }
+    }
+  }
+}
+''';
+
+/// Parses a response to [_requestedPrsQuery]. Entries without a usable
+/// repository or number are skipped.
+RequestedPrPage parseRequestedPrPage(String json) {
   final decoded = jsonDecode(json);
-  if (decoded is! List) return [];
+  final data = decoded is Map ? decoded['data'] : null;
+  final search = data is Map ? data['search'] : null;
+  if (search is! Map) return const RequestedPrPage([], null);
   final prs = <RequestedPr>[];
-  for (final entry in decoded.whereType<Map>()) {
-    final nameWithOwner = (entry['repository'] as Map?)?['nameWithOwner'] as String? ?? '';
-    final slash = nameWithOwner.indexOf('/');
-    final number = entry['number'];
-    if (slash <= 0 || slash == nameWithOwner.length - 1 || number is! int) continue;
-    final owner = nameWithOwner.substring(0, slash);
-    final repo = nameWithOwner.substring(slash + 1);
+  for (final node in (search['nodes'] as List? ?? const []).whereType<Map<String, dynamic>>()) {
+    final repository = node['repository'] as Map?;
+    final owner = (repository?['owner'] as Map?)?['login'] as String? ?? '';
+    final repo = repository?['name'] as String? ?? '';
+    final number = node['number'];
+    if (owner.isEmpty || repo.isEmpty || number is! int) continue;
     prs.add(RequestedPr(
-      entry['url'] as String? ?? 'https://github.com/$owner/$repo/pull/$number',
+      node['url'] as String? ?? 'https://github.com/$owner/$repo/pull/$number',
       owner,
       repo,
       number,
-      (entry['author'] as Map?)?['login'] as String? ?? '',
+      (node['author'] as Map?)?['login'] as String? ?? '',
+      _describePrStatus(node),
     ));
   }
-  return prs;
+  final pageInfo = search['pageInfo'] as Map?;
+  final next = (pageInfo?['hasNextPage'] == true) ? (pageInfo!['endCursor'] as String?) : null;
+  return RequestedPrPage(prs, next);
 }
 
 /// The keys ([RequestedPr.key]) of the pull request cloned in [prDir], laid
@@ -1807,26 +1952,39 @@ Future<void> _checkPrsCommand(List<String> args) async {
   }
 
   print("Searching for pull requests waiting on your review...");
-  final search = _runGh([
-    'search',
-    'prs',
-    '--review-requested=@me',
-    '--state=open',
-    '--limit',
-    '200',
-    '--json',
-    'url,repository,number,author',
-  ]);
-  if (search.exitCode != 0) {
-    print("\x1b[31mError: Unable to search pull requests\x1b[0m");
+  final prs = <RequestedPr>[];
+  String? cursor;
+  do {
+    final search = _runGh([
+      'api',
+      'graphql',
+      '-f',
+      'query=$_requestedPrsQuery',
+      if (cursor != null) ...['-f', 'after=$cursor'],
+    ]);
     final err = search.stderr.toString().trim();
-    if (err.isNotEmpty) {
-      print(err);
+    final RequestedPrPage page;
+    try {
+      page = parseRequestedPrPage(search.stdout.toString());
+    } on FormatException {
+      print("\x1b[31mError: Unable to search pull requests\x1b[0m");
+      if (err.isNotEmpty) print(err);
+      exit(1);
     }
-    exit(1);
-  }
-  final prs = parseRequestedPrs(search.stdout.toString())
-    ..sort((a, b) {
+    if (search.exitCode != 0) {
+      // GraphQL can fail for some results (such as an org needing SSO) and
+      // still return the rest.
+      if (page.prs.isEmpty && page.nextCursor == null) {
+        print("\x1b[31mError: Unable to search pull requests\x1b[0m");
+        if (err.isNotEmpty) print(err);
+        exit(1);
+      }
+      print("\x1b[33mWarning: some results may be missing${err.isEmpty ? '' : ': ${err.split('\n').first}'}\x1b[0m");
+    }
+    prs.addAll(page.prs);
+    cursor = page.nextCursor;
+  } while (cursor != null);
+  prs.sort((a, b) {
       final byRepo = a.owner.toLowerCase().compareTo(b.owner.toLowerCase());
       if (byRepo != 0) return byRepo;
       final byName = a.repo.toLowerCase().compareTo(b.repo.toLowerCase());
@@ -1856,6 +2014,7 @@ Future<void> _checkPrsCommand(List<String> args) async {
     ..addColumn('repo', displayName: 'Repo')
     ..addColumn('number', displayName: 'PR #')
     ..addColumn('author', displayName: 'Author')
+    ..addColumn('status', displayName: 'Status')
     ..addColumn('reviewed', displayName: 'Reviewed');
   for (final pr in prs) {
     table.addRow({
@@ -1864,6 +2023,7 @@ Future<void> _checkPrsCommand(List<String> args) async {
       'repo': pr.repo,
       'number': '${pr.number}',
       'author': pr.author,
+      'status': pr.status,
       'reviewed': folders.containsKey(pr.key) ? 'yes' : '',
     });
   }

@@ -1,36 +1,56 @@
+import 'dart:convert';
+
 import 'package:rl_tools/gitty.dart';
 import 'package:test/test.dart';
 
 void main() {
-  group('parseRequestedPrs', () {
-    test('reads the url, repository, number and author', () {
-      final prs = parseRequestedPrs('[{"author":{"login":"jeff-1440"},"number":259,'
-          '"repository":{"name":"Repo","nameWithOwner":"Org-1/Repo"},'
-          '"url":"https://github.com/Org-1/Repo/pull/259"}]');
-      expect(prs, hasLength(1));
-      expect(prs.single.url, 'https://github.com/Org-1/Repo/pull/259');
-      expect(prs.single.owner, 'Org-1');
-      expect(prs.single.repo, 'Repo');
-      expect(prs.single.number, 259);
-      expect(prs.single.author, 'jeff-1440');
-      expect(prs.single.key, 'org-1/repo#259');
+  group('parseRequestedPrPage', () {
+    String response(List<Map<String, dynamic>> nodes, {bool more = false}) => jsonEncode({
+          'data': {
+            'search': {
+              'pageInfo': {'hasNextPage': more, 'endCursor': more ? 'abc' : null},
+              'nodes': nodes,
+            }
+          }
+        });
+    Map<String, dynamic> node({int? number = 259, String owner = 'Org-1', String repo = 'Repo', Map<String, dynamic> extra = const {}}) => {
+          if (number != null) 'number': number,
+          'url': 'https://github.com/$owner/$repo/pull/$number',
+          'state': 'OPEN',
+          'author': {'login': 'jeff-1440'},
+          'repository': {'name': repo, 'owner': {'login': owner}},
+          ...extra,
+        };
+
+    test('reads the url, repository, number, author and status', () {
+      final page = parseRequestedPrPage(response([node(extra: {'reviewDecision': 'CHANGES_REQUESTED'})]));
+      final pr = page.prs.single;
+      expect(pr.url, 'https://github.com/Org-1/Repo/pull/259');
+      expect(pr.owner, 'Org-1');
+      expect(pr.repo, 'Repo');
+      expect(pr.number, 259);
+      expect(pr.author, 'jeff-1440');
+      expect(pr.status, 'OPEN (changes requested)');
+      expect(pr.key, 'org-1/repo#259');
+      expect(page.nextCursor, isNull);
     });
 
-    test('fills in a missing url and author', () {
-      final pr = parseRequestedPrs('[{"number":7,"repository":{"nameWithOwner":"o/r"}}]').single;
-      expect(pr.url, 'https://github.com/o/r/pull/7');
-      expect(pr.author, '');
+    test('describes drafts like pr-review-check', () {
+      expect(parseRequestedPrPage(response([node(extra: {'isDraft': true})])).prs.single.status, 'OPEN (draft)');
+    });
+
+    test('returns the cursor when there are more pages', () {
+      expect(parseRequestedPrPage(response([node()], more: true)).nextCursor, 'abc');
     });
 
     test('skips entries without a repository or number', () {
-      expect(
-          parseRequestedPrs('[{"number":7},{"repository":{"nameWithOwner":"o/r"}},'
-              '{"number":8,"repository":{"nameWithOwner":"bad"}}]'),
-          isEmpty);
+      expect(parseRequestedPrPage(response([node(number: null), node(owner: ''), {}])).prs, isEmpty);
     });
 
-    test('returns nothing for a non-list', () {
-      expect(parseRequestedPrs('{}'), isEmpty);
+    test('returns nothing without search data', () {
+      final page = parseRequestedPrPage('{"errors":[]}');
+      expect(page.prs, isEmpty);
+      expect(page.nextCursor, isNull);
     });
   });
 
